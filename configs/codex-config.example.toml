@@ -1,0 +1,11 @@
+# Add this example to ~/.codex/config.toml.
+# Hooks are enabled by default; codex_hooks is a deprecated alias.
+# Codex does not enforce standalone ask, so --host codex converts ask to deny.
+# Policygate never emits allow and therefore never bypasses normal approval.
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/policygate --host codex"

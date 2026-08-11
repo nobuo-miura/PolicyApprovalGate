@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-codex",
+  "cwd": "/workspace/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "rm -rf /"},
+  "tool_use_id": "tool-fixture"
+}

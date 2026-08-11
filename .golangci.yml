@@ -1,0 +1,40 @@
+version: "2"
+
+linters:
+  enable:
+    # Security-oriented checks matter most for a policy gate.
+    - gosec
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - misspell
+    - nilerr
+    - unconvert
+
+  settings:
+    gosec:
+      excludes:
+        # Paths come from configuration and from the hook payload by design;
+        # they are resolved and checked in internal/pathpolicy and internal/audit.
+        - G304
+        # Same reason, reported through taint analysis. The config path is the
+        # user's own POLICYGATE_CONFIG, and temp paths come from os.CreateTemp.
+        - G703
+    errcheck:
+      check-type-assertions: true
+
+  exclusions:
+    rules:
+      # Test fixtures deliberately construct hostile commands and paths.
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt

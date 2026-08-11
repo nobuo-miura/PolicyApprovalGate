@@ -1,0 +1,122 @@
+# Built-in policy. Use `policygate init` to write it to
+# ~/.policygate/config.yaml, or set POLICYGATE_CONFIG to another path.
+# Patterns use Go RE2 regular expressions.
+config_version: 1
+mode: enforce # enforce | observe
+
+# Deny rules apply to the complete command and always take precedence. A deny
+# is final, so rules naming a program are anchored to a command position: the
+# start of the text or just after a separator. That keeps ordinary text such as
+# `git commit -m "halt the retry loop"` from being rejected. Rules are matched
+# against the command as written and again with wrappers removed and the
+# program name unquoted, so `sudo reboot`, `nice rm -rf /`, and `re'b'oot` are
+# all matched at the start of their resolved form.
+deny:
+  - pattern: '(^|[;&|])\s*(/\S*/)?rm\s+(-\w*r\w*f\w*|-\w*f\w*r\w*)\s+(/|~)(\s|$)'
+    reason: "Recursive force-delete of / or $HOME"
+  - pattern: ':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:'
+    reason: "Shell fork bomb"
+  - pattern: '(^|[;&|])\s*(/\S*/)?dd\b[^|;]*\bof=/dev/(disk|sd|hd|nvme)'
+    reason: "Raw write to a block device"
+  - pattern: '(^|[;&|])\s*(/\S*/)?mkfs(\.\w+)?\b'
+    reason: "Filesystem format command"
+  - pattern: '>\s*/dev/(sd|hd|nvme|disk)\w*'
+    reason: "Direct write to a block device"
+  - pattern: '(^|[;&|])\s*(/\S*/)?(curl|wget)[^|;]*\|\s*(sudo\s+)?(sh|bash|zsh)\b'
+    reason: "Piping a network download directly into a shell"
+  - pattern: '(^|[;&|])\s*(/\S*/)?chmod\s+-R\s+777\s+/'
+    reason: "Recursive world-writable permissions on /"
+  - pattern: '(^|[;&|])\s*sudo\s+(-\S+\s+|\w+=\S+\s+)*(/\S*/)?rm\b'
+    reason: "Privileged delete"
+  - pattern: '>\s*/etc/(passwd|shadow|sudoers)\b'
+    reason: "Overwriting a critical system file"
+  - pattern: '(^|[;&|])\s*(/\S*/)?(shutdown|reboot|poweroff|halt)\b'
+    reason: "Host power state change"
+  - pattern: '(^|[;&|])\s*(/\S*/)?(python3?|perl|ruby|sh|bash|zsh)\b[^;\n]*(\.policygate|\.codex/(config\.toml|hooks\.json)|\.claude/settings(\.local)?\.json)'
+    reason: "Interpreter-based modification of policygate or hook configuration"
+
+# Ask rules request explicit host approval for specific commands without
+# denying them outright. They are checked the same way deny rules are:
+# against the whole command and again against each subcommand's resolved
+# form, so quoting cannot hide a matched program name. Empty by default;
+# add patterns here (or in a user config) for commands you want to confirm
+# on a case-by-case basis, such as specific git or gh write operations.
+ask: []
+
+# Allow rules classify familiar low-risk commands for audit purposes. They
+# never bypass host approval. Do not add commands that can launch another
+# program from their arguments, such as find -exec, xargs, or awk system().
+allow:
+  - pattern: '^git\s+(status|log|diff|show)\b'
+    reason: "Read-only git inspection"
+  - pattern: '^(ls|pwd|cat|head|tail|grep|wc)\b'
+    reason: "Read-only filesystem inspection"
+  - pattern: '^echo\b'
+    reason: "Prints to stdout only"
+
+# Inspect refspecs, force markers, deletion, and branch-omitting pushes.
+protected_branches:
+  names: ["main", "master"]
+  block_force_push: true
+  block_delete: true
+  block_direct_push: false
+
+# Classify supported path arguments as read, write, or delete operations.
+path_scope:
+  enabled: true
+  # Use the hook CWD as the root, or set a fixed absolute path.
+  project_root: "cwd"
+  outside_project:
+    read: "allow"   # allow | ask | deny
+    write: "ask"
+    delete: "deny"
+
+sensitive_paths:
+  enabled: true
+  patterns:
+    - pattern: '(^|/)\.env(\.[\w.-]+)?$'
+      reason: "Environment/secrets file"
+    - pattern: '(^|/)\.ssh(/|$)'
+      reason: "SSH keys/config"
+    - pattern: '(^|/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$'
+      reason: "SSH private/public key"
+    - pattern: '\.(pem|p12|pfx|key)$'
+      reason: "Certificate/private key file"
+    - pattern: '(^|/)credentials(\.\w+)?$'
+      reason: "Credentials file"
+    - pattern: '(^|/)\.aws/credentials$'
+      reason: "AWS credentials"
+    - pattern: '(^|/)\.netrc$'
+      reason: "Stored network credentials"
+  # Apply regardless of whether the path is inside the project.
+  policy:
+    read: "ask"
+    write: "deny"
+    delete: "deny"
+
+# Always deny writes and deletions to matched paths. This is a soft guard;
+# place the binary and hook configuration in OS-protected locations as well.
+protected_paths:
+  enabled: true
+  patterns:
+    - pattern: '(^|/)\.policygate($|/)'
+      reason: "policygate's own config/audit directory"
+    - pattern: '(^|/)\.codex/(config\.toml|hooks\.json)$'
+      reason: "Codex CLI hook registration"
+    - pattern: '(^|/)\.claude/settings(\.local)?\.json$'
+      reason: "Claude Code hook registration"
+
+# No AI or LLM fallback is used for unmatched commands.
+unknown:
+  action: defer # defer | deny
+
+# Action used when shell syntax cannot be parsed.
+parse_error:
+  action: defer # defer | deny
+
+audit:
+  enabled: true
+  path: "~/.policygate/log/audit.log"
+  command_mode: redacted # redacted | full | hash | none
+  max_bytes: 10485760
+  max_files: 5

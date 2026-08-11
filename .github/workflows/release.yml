@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# Actions are pinned to a commit SHA so a moving tag cannot change what runs.
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # Required to create the release and upload its assets.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Validate the source before building any release archive.
+      - name: Check formatting and modules
+        run: |
+          test -z "$(gofmt -l .)"
+          go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race test
+        run: go test -race ./...
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12
+
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Build release binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="policygate_${VERSION}_${os}_${arch}"
+            bin="policygate"
+            [ "$os" = "windows" ] && bin="policygate.exe"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/${bin}" ./cmd/policygate
+            if [ "$os" = "windows" ]; then
+              (cd dist && zip -q "${name}.zip" "${bin}" && rm "${bin}")
+            else
+              (cd dist && tar -czf "${name}.tar.gz" "${bin}" && rm "${bin}")
+            fi
+          done
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Published as a pre-release until compatibility is validated with
+          # real hosts.
+          gh release create "$VERSION" dist/* \
+            --prerelease \
+            --title "$VERSION" \
+            --generate-notes \
+            --notes "Verify a downloaded archive against \`SHA256SUMS\` before installing. Built for darwin, linux, and windows on amd64 and arm64; windows support is experimental."
