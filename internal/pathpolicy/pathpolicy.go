@@ -1,9 +1,20 @@
 // Package pathpolicy classifies shell path arguments as reads, writes, or
 // deletions and evaluates them relative to a project root.
+//
+// Shell command text is always POSIX-style (forward slashes, no drive
+// letters) regardless of the host OS, so path arguments taken from a parsed
+// command are manipulated with the "path" package (aliased posixpath below),
+// never "path/filepath". Real host filesystem locations (a hook's working
+// directory, $HOME) arrive in the host's native format; Resolve and
+// ResolvePhysical normalize them with filepath.ToSlash on entry so the rest
+// of this package can assume forward slashes throughout. path/filepath is
+// kept only for that normalization and for the handful of calls that must
+// touch the real filesystem (os.Stat, os.Lstat, filepath.EvalSymlinks).
 package pathpolicy
 
 import (
 	"os"
+	posixpath "path"
 	"path/filepath"
 	"strings"
 
@@ -324,7 +335,7 @@ func containsUnresolved(path string) bool {
 
 func baseName(cmdName string) string {
 	// Use the base name so absolute argv[0] values still match.
-	return filepath.Base(cmdName)
+	return posixpath.Base(cmdName)
 }
 
 // Worst returns the most severe operation in accesses.
@@ -360,7 +371,7 @@ func RewriteThroughPending(path string, links []Symlink) string {
 		if l.Link == "" {
 			continue
 		}
-		if path == l.Link || strings.HasPrefix(path, l.Link+string(filepath.Separator)) {
+		if path == l.Link || strings.HasPrefix(path, l.Link+"/") {
 			if len(l.Link) > bestLen {
 				bestLen = len(l.Link)
 				best = l
@@ -370,7 +381,7 @@ func RewriteThroughPending(path string, links []Symlink) string {
 	if bestLen < 0 {
 		return path
 	}
-	return filepath.Join(best.Target, strings.TrimPrefix(path, best.Link))
+	return posixpath.Join(best.Target, strings.TrimPrefix(path, best.Link))
 }
 
 // TrackCWD returns the effective CWD and pending symbolic links before each
@@ -512,7 +523,7 @@ func parseLnSymlinks(sc shellparse.Command, cur CWDState, home string, pending [
 		}
 		var links []Symlink
 		for _, source := range positional {
-			if l := makePendingSymlink(cur, home, source, filepath.Join(targetDirectory, filepath.Base(source)), pending); l != nil {
+			if l := makePendingSymlink(cur, home, source, posixpath.Join(targetDirectory, posixpath.Base(source)), pending); l != nil {
 				links = append(links, *l)
 			}
 		}
@@ -521,7 +532,7 @@ func parseLnSymlinks(sc shellparse.Command, cur CWDState, home string, pending [
 
 	if len(positional) == 1 {
 		source := positional[0]
-		return symlinkSlice(makePendingSymlink(cur, home, source, filepath.Base(source), pending))
+		return symlinkSlice(makePendingSymlink(cur, home, source, posixpath.Base(source), pending))
 	}
 
 	sources := positional[:len(positional)-1]
@@ -542,7 +553,7 @@ func parseLnSymlinks(sc shellparse.Command, cur CWDState, home string, pending [
 	for _, source := range sources {
 		linkPath := destination
 		if destinationIsDir {
-			linkPath = filepath.Join(destination, filepath.Base(source))
+			linkPath = posixpath.Join(destination, posixpath.Base(source))
 		}
 		if l := makePendingSymlink(cur, home, source, linkPath, pending); l != nil {
 			links = append(links, *l)
@@ -565,8 +576,8 @@ func makePendingSymlink(cur CWDState, home, source, linkPath string, pending []S
 		return nil
 	}
 	link := RewriteThroughPending(Resolve(cur.Path, home, linkPath), pending)
-	targetBase := filepath.Dir(link)
-	if filepath.IsAbs(source) || source == "~" || strings.HasPrefix(source, "~/") {
+	targetBase := posixpath.Dir(link)
+	if posixpath.IsAbs(source) || source == "~" || strings.HasPrefix(source, "~/") {
 		targetBase = cur.Path
 	}
 	return &Symlink{
@@ -576,58 +587,70 @@ func makePendingSymlink(cur CWDState, home, source, linkPath string, pending []S
 }
 
 // Resolve expands a leading tilde and converts path to a clean absolute path.
+// cwd and home may be in the host's native format (for example a Windows
+// working directory); both are normalized to forward slashes before path,
+// which is always POSIX-style shell text, is resolved against them.
 func Resolve(cwd, home, path string) string {
 	if path == "" {
 		return path
 	}
+	cwd = filepath.ToSlash(cwd)
+	home = filepath.ToSlash(home)
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		if home != "" {
-			path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+			path = posixpath.Join(home, strings.TrimPrefix(path, "~"))
 		}
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(cwd, path)
+	if !posixpath.IsAbs(path) {
+		path = posixpath.Join(cwd, path)
 	}
-	return filepath.Clean(path)
+	return posixpath.Clean(path)
 }
 
 // ResolvePhysical resolves symlinks in the longest existing ancestor and
-// rejoins missing trailing components.
+// rejoins missing trailing components. path may be in the host's native
+// format; the result always uses forward slashes.
 func ResolvePhysical(path string) string {
-	if path == "" {
+	if path == "" || path == "/" {
 		return path
 	}
+	path = filepath.ToSlash(path)
 	p := path
 	var suffix []string
 	for {
 		if _, err := os.Lstat(p); err == nil {
 			break
 		}
-		parent := filepath.Dir(p)
+		parent := posixpath.Dir(p)
 		if parent == p {
 			return path
 		}
-		suffix = append([]string{filepath.Base(p)}, suffix...)
+		suffix = append([]string{posixpath.Base(p)}, suffix...)
 		p = parent
 	}
 	real, err := filepath.EvalSymlinks(p)
 	if err != nil {
 		return path
 	}
+	// EvalSymlinks returns a path in the host's native format on some
+	// platforms; keep the forward-slash invariant for callers.
+	real = filepath.ToSlash(real)
 	if len(suffix) == 0 {
 		return real
 	}
-	return filepath.Join(append([]string{real}, suffix...)...)
+	return posixpath.Join(append([]string{real}, suffix...)...)
 }
 
-// IsOutside reports whether resolvedPath is outside resolvedRoot.
+// IsOutside reports whether resolvedPath is outside resolvedRoot. Both
+// arguments are expected to already be clean, forward-slash paths, as
+// returned by ResolvePhysical.
 func IsOutside(resolvedRoot, resolvedPath string) bool {
-	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
-	if err != nil {
+	if resolvedRoot == "" {
 		return true
 	}
-	if rel == "." {
+	root := strings.TrimSuffix(resolvedRoot, "/")
+	if resolvedPath == root || resolvedPath == resolvedRoot {
 		return false
 	}
-	return strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".."
+	return !strings.HasPrefix(resolvedPath, root+"/")
 }

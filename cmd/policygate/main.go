@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -437,7 +438,7 @@ func nestedScriptGroups(subcmds []shellparse.Command, startCWD string, depth int
 // parseNestedScript parses the script carried by a literal sh -c or eval.
 func parseNestedScript(cmd shellparse.Command) ([]shellparse.Command, bool) {
 	unwrapped := shellparse.Unwrap(cmd)
-	script, ok := literalNestedShellScript(filepath.Base(unwrapped.Name()), unwrapped.Argv)
+	script, ok := literalNestedShellScript(path.Base(unwrapped.Name()), unwrapped.Argv)
 	if !ok {
 		return nil, false
 	}
@@ -482,7 +483,7 @@ func checkCriticalDeletesContext(subcmds []shellparse.Command, startCWD string, 
 	states, _ := pathpolicy.TrackCWD(subcmds, startCWD, home)
 	for i, original := range subcmds {
 		cmd := shellparse.Unwrap(original)
-		name := filepath.Base(cmd.Name())
+		name := path.Base(cmd.Name())
 		throughXargs := xargsInput || passesThroughXargs(original.Argv)
 		if script, ok := literalNestedShellScript(name, cmd.Argv); ok && !states[i].Indeterminate {
 			if nested, err := shellparse.Parse(script); err == nil {
@@ -544,7 +545,7 @@ func checkCriticalDeletesContext(subcmds []shellparse.Command, startCWD string, 
 				return true, "recursive force-delete of current user's home directory"
 			}
 			resolved := pathpolicy.ResolvePhysical(pathpolicy.Resolve(state.Path, home, target))
-			if resolved == string(filepath.Separator) {
+			if resolved == "/" {
 				return true, "recursive force-delete of filesystem root"
 			}
 			if home != "" && resolved == pathpolicy.ResolvePhysical(home) {
@@ -582,7 +583,7 @@ func xargsInputTargets(cmd shellparse.Command) ([]string, bool) {
 // passesThroughXargs reports whether argv runs its tail through xargs.
 func passesThroughXargs(argv []string) bool {
 	for _, a := range argv {
-		if filepath.Base(strings.TrimPrefix(a, `\`)) == "xargs" {
+		if path.Base(strings.TrimPrefix(a, `\`)) == "xargs" {
 			return true
 		}
 	}
@@ -593,7 +594,7 @@ func passesThroughXargs(argv []string) bool {
 // quoted expansion keeps its quotes, because the parser cannot resolve it.
 func isHomeExpansion(target string) bool {
 	target = strings.Trim(target, `"'`)
-	switch strings.TrimSuffix(target, string(filepath.Separator)) {
+	switch strings.TrimSuffix(target, "/") {
 	case "$HOME", "${HOME}":
 		return true
 	default:

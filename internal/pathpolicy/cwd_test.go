@@ -19,7 +19,11 @@ func parseCmds(t *testing.T, cmd string) []shellparse.Command {
 
 func TestTrackCWDFollowsCd(t *testing.T) {
 	projectDir := t.TempDir()
-	cmds := parseCmds(t, "cd /tmp && rm -rf target")
+	// A real, guaranteed-to-exist absolute directory, expressed as shell text
+	// (forward slashes), rather than a platform-specific path like /tmp,
+	// which is not guaranteed to exist on every CI runner.
+	targetDir := filepath.ToSlash(t.TempDir())
+	cmds := parseCmds(t, "cd "+targetDir+" && rm -rf target")
 	states, _ := TrackCWD(cmds, projectDir, "")
 	if len(states) != 2 {
 		t.Fatalf("got %d states, want 2", len(states))
@@ -27,9 +31,8 @@ func TestTrackCWDFollowsCd(t *testing.T) {
 	if states[0].Path != projectDir {
 		t.Errorf("state[0].Path = %q, want the starting cwd", states[0].Path)
 	}
-	// /tmp exists on the platforms covered by this test.
-	if states[1].Path != "/tmp" || states[1].Indeterminate {
-		t.Errorf("state[1] = %+v, want /tmp non-indeterminate", states[1])
+	if states[1].Path != targetDir || states[1].Indeterminate {
+		t.Errorf("state[1] = %+v, want %q non-indeterminate", states[1], targetDir)
 	}
 }
 
