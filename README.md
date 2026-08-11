@@ -223,12 +223,14 @@ policygate version
 ## Limitations
 
 - Only Bash tool calls are covered. Other tools and direct file edits are not inspected.
+- An `ask` decision prompts for confirmation in Claude Code but is converted to `deny` in Codex, which does not support standalone confirmation from a PreToolUse hook. The same policy can therefore produce a prompt on Claude Code and a rejected command on Codex.
 - Regex and bounded shell analysis cannot fully handle obfuscation or unsupported syntax.
 - Git aliases are not resolved, so a push hidden behind one such as `git pushf` passes the protected-branch check. Resolving an alias requires reading `git config`, and an alias can itself be an arbitrary shell command (`!sh -c ...`). Pair this with branch protection on the remote when the rule must hold.
 - A command name produced by a variable or command substitution, such as `$CMD -rf /`, cannot be resolved during analysis.
 - Pipelines, subshells, and conditionals are not fully executed semantically; related commands are treated as indeterminate and evaluated conservatively.
 - A normal directory created earlier in the same chain does not exist at analysis time, so a later `cd` may be treated as failed.
-- Internal errors fail open to the host's normal approval flow.
+- Unknown commands and shell syntax that cannot be parsed follow `unknown.action` and `parse_error.action`; both default to `defer` and can be changed to `deny`.
+- An invalid explicit policy configuration returns `deny` for a valid Bash hook call. Hook input, decision-output, and audit-log failures are reported to standard error, but cannot always produce or replace the host decision.
 - The bundled rules are a starting point and should be adapted to your environment.
 
 ## Development
