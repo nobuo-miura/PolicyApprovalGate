@@ -619,12 +619,16 @@ func literalNestedShellScript(name string, argv []string) (string, bool) {
 	return "", false
 }
 
-// actionDecision turns deny into an explicit rejection and otherwise delegates.
+// actionDecision maps a configured fallback action to a host decision.
 func actionDecision(a rules.ActionConfig, reason string) (hook.Decision, string) {
-	if a.Action == "deny" {
+	switch a.Action {
+	case "ask":
+		return hook.DecisionAsk, reason
+	case "deny":
 		return hook.DecisionDeny, reason
+	default:
+		return "", reason
 	}
-	return "", reason
 }
 
 // allSubcommandsAllowed reports whether every simple command matches an audit

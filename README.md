@@ -153,9 +153,43 @@ See [internal/rules/default.yaml](internal/rules/default.yaml) for every built-i
 | `path_scope` | Control read / write / delete outside the project |
 | `sensitive_paths` | Protect `.env`, SSH keys, credentials, and similar paths |
 | `protected_paths` | Always deny writes and deletes to gate configuration and hook registration |
-| `unknown` | `defer` or `deny` when no rule matches |
-| `parse_error` | `defer` or `deny` when shell syntax cannot be parsed |
+| `unknown` | `defer`, `ask`, or `deny` when no rule matches |
+| `parse_error` | `defer`, `ask`, or `deny` when shell syntax cannot be parsed |
 | `audit` | Configure path, command recording, and rotation |
+
+To require confirmation when PolicyApprovalGate cannot classify a command, set the fallback actions to `ask`:
+
+```yaml
+unknown:
+  action: ask
+
+parse_error:
+  action: ask
+```
+
+Claude Code prompts for these fallbacks. Codex does not support standalone `ask`, so PolicyApprovalGate converts the result to `deny`.
+
+Note how far that conversion reaches: under Codex, `unknown.action: ask` **rejects every command that matches no rule**, including ordinary work such as `go build ./...` or `npm run build`. If neither `--host` nor `POLICYGATE_HOST` identifies Claude, the result is the same because an unspecified host is safely treated as non-Claude. Treat an `ask` fallback as a Claude Code setting and identify the host with `--host claude` or `POLICYGATE_HOST=claude`. Both `policygate check-config` and `policygate doctor` detect the setting and print a warning.
+
+### Separate configuration files per host
+
+The configuration has no per-host settings. If you use both hosts and want them to behave differently — `ask` under Claude Code but `defer` under Codex, for example — point each hook registration at its own file with `POLICYGATE_CONFIG`. The configuration is read on every hook call, so each host can carry an independent policy.
+
+Claude Code (`settings.json`):
+
+```json
+"command": "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/claude.yaml /usr/local/bin/policygate --host claude"
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+command = "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/codex.yaml /usr/local/bin/policygate --host codex"
+```
+
+Keep both files under the user's `.policygate` directory and retain the generated `.policygate` entry in enabled `protected_paths`, so writes and deletes to them are denied. The paths above are placeholders; replace them with the absolute paths to `~/.policygate/claude.yaml` and `~/.policygate/codex.yaml`. `~` and `$HOME` are expanded only when the host runs the command through a shell, and an unexpanded value leaves the configuration file unreadable. If a policy must live elsewhere, add its path to `protected_paths.patterns` before registering the hook.
+
+The policy now lives in two files, so take care that shared parts such as deny rules stay in sync. Note also that an unreadable path makes enforce mode deny the Bash call, so validate each file with `policygate check-config --config <path>` before registering the hook.
 
 Allow rules classify familiar low-risk commands for audit metadata and never bypass host approval. Do not add command launchers such as `find -exec`, `xargs`, or `awk system()`; they produce misleading audit classifications even though they cannot bypass approval.
 
@@ -202,7 +236,7 @@ Redaction is not exhaustive and may over-redact ordinary text. Use `hash` or `no
 | --- | --- | --- |
 | `policygate check-config` | Loads the configuration file and validates its schema and values, printing any warnings or errors. | After creating or editing a configuration, before registering the hook |
 | `policygate doctor` | Prints the version, OS/architecture, binary path, host, and configuration load status. | When diagnosing installation or configuration problems |
-| `policygate evaluate --host codex --command 'rm -rf /'` | Evaluates a command against the current policy **without executing it**, then prints the result as JSON. | When checking deny / defer behavior after changing rules |
+| `policygate evaluate --host codex --command 'rm -rf /'` | Evaluates a command against the current policy **without executing it**, then prints the result as JSON. | When checking defer / ask / deny behavior after changing rules |
 | `policygate observe --host codex` | Reads one PreToolUse JSON input from standard input and records the evaluation without blocking it. | When testing hook integration without enforcement |
 | `policygate version` | Prints the PolicyApprovalGate version. | When checking the installed version |
 | `policygate help` | Prints the subcommands and environment variables. | When checking usage |
@@ -229,7 +263,7 @@ policygate version
 - A command name produced by a variable or command substitution, such as `$CMD -rf /`, cannot be resolved during analysis.
 - Pipelines, subshells, and conditionals are not fully executed semantically; related commands are treated as indeterminate and evaluated conservatively.
 - A normal directory created earlier in the same chain does not exist at analysis time, so a later `cd` may be treated as failed.
-- Unknown commands and shell syntax that cannot be parsed follow `unknown.action` and `parse_error.action`; both default to `defer` and can be changed to `deny`.
+- Unknown commands and shell syntax that cannot be parsed follow `unknown.action` and `parse_error.action`; both default to `defer` and can be changed to `ask` or `deny`. As with other `ask` decisions, Claude Code prompts for confirmation and Codex converts the decision to `deny`.
 - An invalid explicit policy configuration returns `deny` for a valid Bash hook call. Hook input, decision-output, and audit-log failures are reported to standard error, but cannot always produce or replace the host decision.
 - The bundled rules are a starting point and should be adapted to your environment.
 

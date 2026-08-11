@@ -224,6 +224,13 @@ func TestParseRejectsInvalidParseErrorAction(t *testing.T) {
 	}
 }
 
+func TestParseAcceptsAskFallbackActions(t *testing.T) {
+	_, err := Parse([]byte("unknown:\n  action: ask\nparse_error:\n  action: ask\n"))
+	if err != nil {
+		t.Fatalf("expected ask fallback actions to be valid, got error: %v", err)
+	}
+}
+
 func TestParseAcceptsEmptyOptionalEnumFields(t *testing.T) {
 	_, err := Parse([]byte("path_scope:\n  enabled: true\n"))
 	if err != nil {

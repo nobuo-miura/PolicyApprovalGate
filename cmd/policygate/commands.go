@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
 	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
@@ -77,8 +78,33 @@ func runCheckConfig(args []string) int {
 	for _, warning := range warnings {
 		fmt.Printf("warning: %s\n", warning)
 	}
+	if warning := fallbackAskWarning(cfg); warning != "" {
+		fmt.Printf("warning: %s\n", warning)
+	}
 	fmt.Printf("ok: %s (schema v%d, mode %s)\n", *path, cfg.Version, cfg.Mode)
 	return 0
+}
+
+// fallbackAskWarning reports fallback actions set to ask, which only Claude
+// Code enforces. Every other host converts ask to deny, so such a fallback
+// rejects each command that reaches it instead of asking for confirmation.
+//
+// The warning is deliberately host-neutral: neither check-config nor doctor
+// accepts --host, so neither can tell which host the registered hook runs
+// under, and a host-specific verdict would misreport a correct setup.
+func fallbackAskWarning(cfg *rules.Config) string {
+	var sections []string
+	if cfg.Unknown.Action == "ask" {
+		sections = append(sections, "unknown.action")
+	}
+	if cfg.ParseError.Action == "ask" {
+		sections = append(sections, "parse_error.action")
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s: ask is preserved only when the resolved host is Claude (--host claude or POLICYGATE_HOST=claude); every other host converts it to deny and rejects each command that reaches the fallback",
+		strings.Join(sections, " and "))
 }
 
 func runDoctor(args []string) int {
@@ -97,6 +123,9 @@ func runDoctor(args []string) int {
 	} else {
 		fmt.Printf("config: ok (%s, schema v%d, mode %s)\n", path, cfg.Version, cfg.Mode)
 		for _, warning := range warnings {
+			fmt.Printf("config warning: %s\n", warning)
+		}
+		if warning := fallbackAskWarning(cfg); warning != "" {
 			fmt.Printf("config warning: %s\n", warning)
 		}
 	}
