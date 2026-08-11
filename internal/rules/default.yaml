@@ -108,11 +108,11 @@ protected_paths:
 
 # No AI or LLM fallback is used for unmatched commands.
 unknown:
-  action: defer # defer | deny
+  action: defer # defer | ask | deny
 
 # Action used when shell syntax cannot be parsed.
 parse_error:
-  action: defer # defer | deny
+  action: defer # defer | ask | deny
 
 audit:
   enabled: true

@@ -825,6 +825,16 @@ func TestEvaluateUnknownDeniesWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestEvaluateUnknownAsksWhenConfigured(t *testing.T) {
+	cfg := mustConfig(t, "unknown:\n  action: ask\naudit:\n  enabled: false\n")
+	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
+
+	decision, _, source, _ := evaluate(cfg, in, "some-totally-unrecognized-command --with-args")
+	if decision != hook.DecisionAsk || source != "unknown" {
+		t.Errorf("decision=%q source=%q, want ask/unknown", decision, source)
+	}
+}
+
 func TestEvaluateParseErrorDefersByDefault(t *testing.T) {
 	cfg := mustConfig(t, "audit:\n  enabled: false\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
@@ -842,6 +852,58 @@ func TestEvaluateParseErrorDeniesWhenConfigured(t *testing.T) {
 	decision, _, source, _ := evaluate(cfg, in, "echo 'unterminated")
 	if decision != hook.DecisionDeny || source != "parse_error" {
 		t.Errorf("decision=%q source=%q, want deny/parse_error", decision, source)
+	}
+}
+
+func TestEvaluateParseErrorAsksWhenConfigured(t *testing.T) {
+	cfg := mustConfig(t, "parse_error:\n  action: ask\naudit:\n  enabled: false\n")
+	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
+
+	decision, _, source, _ := evaluate(cfg, in, "echo 'unterminated")
+	if decision != hook.DecisionAsk || source != "parse_error" {
+		t.Errorf("decision=%q source=%q, want ask/parse_error", decision, source)
+	}
+}
+
+func TestFallbackAskWarningNamesEveryAskFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		config   string
+		want     []string
+		wantNone bool
+	}{
+		{name: "defaults", config: "audit:\n  enabled: false\n", wantNone: true},
+		{name: "deny fallback", config: "unknown:\n  action: deny\n", wantNone: true},
+		{name: "unknown only", config: "unknown:\n  action: ask\n", want: []string{"unknown.action"}},
+		{name: "parse error only", config: "parse_error:\n  action: ask\n", want: []string{"parse_error.action"}},
+		{name: "both", config: "unknown:\n  action: ask\nparse_error:\n  action: ask\n", want: []string{"unknown.action and parse_error.action"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fallbackAskWarning(mustConfig(t, tc.config))
+			if tc.wantNone {
+				if got != "" {
+					t.Fatalf("fallbackAskWarning() = %q, want no warning", got)
+				}
+				return
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("fallbackAskWarning() = %q, want it to mention %q", got, want)
+				}
+			}
+			for _, hostSetting := range []string{"--host claude", "POLICYGATE_HOST=claude"} {
+				if !strings.Contains(got, hostSetting) {
+					t.Errorf("fallbackAskWarning() = %q, want it to mention %q", got, hostSetting)
+				}
+			}
+		})
+	}
+}
+
+func TestFallbackAskWarningOmitsFallbacksThatAreNotAsk(t *testing.T) {
+	got := fallbackAskWarning(mustConfig(t, "unknown:\n  action: ask\nparse_error:\n  action: deny\n"))
+	if strings.Contains(got, "parse_error.action") {
+		t.Errorf("fallbackAskWarning() = %q, want it to name only unknown.action", got)
 	}
 }
 
@@ -909,6 +971,41 @@ func TestFinalizeForHostLeavesDenyAndDeferAlone(t *testing.T) {
 		if got != d {
 			t.Errorf("finalizeForHost(codex, %q) = %q, want unchanged", d, got)
 		}
+	}
+}
+
+func TestRunHookFallbackAskUsesHostBehavior(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fallback string
+		command  string
+		host     string
+		want     hook.Decision
+	}{
+		{name: "unknown on Claude", fallback: "unknown", command: "unrecognized-command", host: "claude", want: hook.DecisionAsk},
+		{name: "unknown on Codex", fallback: "unknown", command: "unrecognized-command", host: "codex", want: hook.DecisionDeny},
+		{name: "parse error on Claude", fallback: "parse_error", command: "echo 'unterminated", host: "claude", want: hook.DecisionAsk},
+		{name: "parse error on Codex", fallback: "parse_error", command: "echo 'unterminated", host: "codex", want: hook.DecisionDeny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			config := "config_version: 1\n" + tc.fallback + ":\n  action: ask\naudit:\n  enabled: false\n"
+			if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("POLICYGATE_CONFIG", path)
+			withArgs(t, "--host", tc.host)
+			input := fmt.Sprintf(`{"cwd":"/workspace","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":%q}}`, tc.command)
+			var output bytes.Buffer
+
+			if code := runHook(strings.NewReader(input), &output, false); code != 0 {
+				t.Fatalf("runHook() = %d, want successful hook processing", code)
+			}
+			want := fmt.Sprintf(`"permissionDecision":%q`, tc.want)
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("output = %s, want %s", output.String(), want)
+			}
+		})
 	}
 }
 

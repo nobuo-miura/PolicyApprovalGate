@@ -153,9 +153,43 @@ Codex hooksは既定で有効です。`codex_hooks` は非推奨の別名で、�
 | `path_scope` | プロジェクト外のread / write / deleteを制御 |
 | `sensitive_paths` | `.env`、SSH鍵、認証情報などへのアクセスを制御 |
 | `protected_paths` | policygate設定やフック登録へのwrite / deleteを常に拒否 |
-| `unknown` | どのルールにも一致しない場合の `defer` / `deny` |
-| `parse_error` | シェル構文を解析できない場合の `defer` / `deny` |
+| `unknown` | どのルールにも一致しない場合の `defer` / `ask` / `deny` |
+| `parse_error` | シェル構文を解析できない場合の `defer` / `ask` / `deny` |
 | `audit` | 保存先、コマンド記録方式、ローテーション設定 |
+
+PolicyApprovalGateがコマンドを分類できない場合に確認を求めるには、フォールバック時の判定を`ask`に設定します。
+
+```yaml
+unknown:
+  action: ask
+
+parse_error:
+  action: ask
+```
+
+Claude Codeではこれらのフォールバック時に確認を求めます。Codexは単独の`ask`に対応していないため、PolicyApprovalGateが`deny`へ変換します。
+
+この変換の影響は大きい点に注意してください。`unknown.action: ask`はCodexでは**どのルールにも一致しないコマンドをすべて拒否**します。`go build ./...`や`npm run build`のような通常の操作も対象です。`--host`と`POLICYGATE_HOST`のどちらでもClaudeを指定していない場合、安全側としてClaude以外と扱うため結果は同じです。フォールバックを`ask`にする場合は、`--host claude`または`POLICYGATE_HOST=claude`でClaude Code向けのホストを指定してください。`policygate check-config`と`policygate doctor`は、この設定を検出して警告を表示します。
+
+### ホストごとに設定ファイルを分ける
+
+設定にホスト別の項目はありません。両方のホストを併用していて、Claude Codeでは`ask`、Codexでは`defer`のように挙動を変えたい場合は、フック登録ごとに`POLICYGATE_CONFIG`で別の設定ファイルを指定してください。設定はフック実行のたびに読み込まれるため、ホストごとに独立したポリシーを持てます。
+
+Claude Code (`settings.json`):
+
+```json
+"command": "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/claude.yaml /usr/local/bin/policygate --host claude"
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+command = "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/codex.yaml /usr/local/bin/policygate --host codex"
+```
+
+両方のファイルはユーザーの`.policygate`ディレクトリ配下へ置き、`protected_paths`を有効にしたまま、生成された`.policygate`の項目を残してください。これにより、その配下への書き込みと削除を拒否します。上記のパスはプレースホルダーなので、`~/.policygate/claude.yaml`と`~/.policygate/codex.yaml`の絶対パスへ置き換えてください。`~`や`$HOME`はホストがコマンドをシェル経由で起動する場合しか展開されず、展開されなければ設定ファイルを読めません。別の場所へ置く必要がある場合は、フック登録前にそのパスを`protected_paths.patterns`へ追加してください。
+
+ポリシーが2ファイルに分かれるため、denyルールなど共通部分の更新漏れに注意してください。また、指定したパスが読めない場合、`enforce`モードはそのBash呼び出しをdenyします。登録前に`policygate check-config --config <path>`で各ファイルを検証してください。
 
 allowルールは既知の低リスクコマンドを監査上分類するためのもので、ホストの承認を省略しません。`find -exec`、`xargs`、`awk system()`のように引数から別プログラムを起動できるコマンドは、監査分類を誤解させるため追加しないでください。
 
@@ -202,7 +236,7 @@ allowルールは既知の低リスクコマンドを監査上分類するため
 | --- | --- | --- |
 | `policygate check-config` | 設定ファイルを読み込み、スキーマと設定値を検証します。警告またはエラーがあれば表示します。 | 設定の作成・編集後、hookへ登録する前 |
 | `policygate doctor` | バージョン、OS/アーキテクチャ、実行ファイルの場所、ホスト、設定ファイルの読込結果を表示します。 | インストールや設定の問題を切り分けるとき |
-| `policygate evaluate --host codex --command 'rm -rf /'` | 指定したコマンドを**実行せずに**現在のポリシーで判定し、結果をJSONで表示します。 | ルール変更後にdeny / deferの結果を確認するとき |
+| `policygate evaluate --host codex --command 'rm -rf /'` | 指定したコマンドを**実行せずに**現在のポリシーで判定し、結果をJSONで表示します。 | ルール変更後にdefer / ask / denyの結果を確認するとき |
 | `policygate observe --host codex` | PreToolUseのJSON入力を標準入力から1件受け取り、拒否せずに判定と監査記録だけを行います。 | hook連携をブロックなしで試すとき |
 | `policygate version` | PolicyApprovalGateのバージョンを表示します。 | 導入済みバージョンを確認するとき |
 | `policygate help` | サブコマンドと環境変数の一覧を表示します。 | 使い方を確認するとき |
@@ -229,7 +263,7 @@ policygate version
 - 変数展開やコマンド置換を含むコマンド名（`$CMD -rf /` など）は解析時に確定できません。
 - pipeline、subshell、条件分岐の完全な実行意味論はモデル化せず、関連コマンドをindeterminateとして安全側に扱います。
 - 同一チェーン内で新規作成する通常ディレクトリは解析時点で存在しないため、後続cdを失敗とみなす場合があります。
-- 未知のコマンドと解析できないシェル構文は、それぞれ`unknown.action`と`parse_error.action`に従います。既定値はどちらも`defer`で、`deny`へ変更できます。
+- 未知のコマンドと解析できないシェル構文は、それぞれ`unknown.action`と`parse_error.action`に従います。既定値はどちらも`defer`で、`ask`または`deny`へ変更できます。ほかの`ask`判定と同様に、Claude Codeでは確認を求め、Codexでは`deny`へ変換します。
 - 明示的に指定したポリシー設定が不正な場合、有効なBash hook呼び出しには`deny`を返します。hook入力、判定出力、監査ログのエラーは標準エラー出力へ報告しますが、常にホスト判定を生成または置き換えられるとは限りません。
 - 組み込みルールは出発点です。利用環境に合わせて調整してください。
 

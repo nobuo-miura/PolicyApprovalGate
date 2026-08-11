@@ -79,7 +79,7 @@ type ProtectedBranchesConfig struct {
 
 // ActionConfig defines the fallback for unmatched or unparseable commands.
 type ActionConfig struct {
-	Action string `yaml:"action"` // "defer" | "deny"
+	Action string `yaml:"action"` // "defer" | "ask" | "deny"
 }
 
 // AuditConfig controls JSON Lines audit logging.
@@ -303,11 +303,11 @@ func (c *Config) validate() error {
 	errs = append(errs, validateAccessPolicy("path_scope.outside_project", c.PathScope.OutsideProject)...)
 	errs = append(errs, validateAccessPolicy("sensitive_paths.policy", c.SensitivePaths.Policy)...)
 
-	if !oneOf(c.Unknown.Action, "", "defer", "deny") {
-		errs = append(errs, fmt.Sprintf("unknown.action: invalid value %q (want defer or deny)", c.Unknown.Action))
+	if !oneOf(c.Unknown.Action, "", "defer", "ask", "deny") {
+		errs = append(errs, fmt.Sprintf("unknown.action: invalid value %q (want defer, ask, or deny)", c.Unknown.Action))
 	}
-	if !oneOf(c.ParseError.Action, "", "defer", "deny") {
-		errs = append(errs, fmt.Sprintf("parse_error.action: invalid value %q (want defer or deny)", c.ParseError.Action))
+	if !oneOf(c.ParseError.Action, "", "defer", "ask", "deny") {
+		errs = append(errs, fmt.Sprintf("parse_error.action: invalid value %q (want defer, ask, or deny)", c.ParseError.Action))
 	}
 	if !oneOf(c.Audit.CommandMode, "redacted", "full", "hash", "none") {
 		errs = append(errs, fmt.Sprintf("audit.command_mode: invalid value %q (want redacted, full, hash, or none)", c.Audit.CommandMode))
