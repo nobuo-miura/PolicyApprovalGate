@@ -138,7 +138,9 @@ func TestEvaluateHandlesFailedCd(t *testing.T) {
 func TestEvaluateFollowsSymlinkCreatedEarlierInChain(t *testing.T) {
 	cfg := mustConfig(t, pathScopeYAML)
 	projectDir := t.TempDir()
-	outsideDir := t.TempDir()
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	outsideDir := filepath.ToSlash(t.TempDir())
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
 	for _, cmd := range []string{
@@ -156,11 +158,14 @@ func TestEvaluateFollowsSymlinkCreatedInsideExistingDirectory(t *testing.T) {
 	cfg := mustConfig(t, pathScopeYAML)
 	projectDir := t.TempDir()
 	outsideDir := t.TempDir()
+	outsideBase := filepath.Base(outsideDir)
 	if err := os.Mkdir(filepath.Join(projectDir, "links"), 0o755); err != nil {
 		t.Fatalf("mkdir links: %v", err)
 	}
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
-	cmd := "ln -s " + outsideDir + " links && cd links/" + filepath.Base(outsideDir) + " && rm -rf target"
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	cmd := "ln -s " + filepath.ToSlash(outsideDir) + " links && cd links/" + outsideBase + " && rm -rf target"
 
 	decision, _, source, _ := evaluate(cfg, in, cmd)
 	if decision != hook.DecisionDeny || source != "path_policy" {
@@ -248,7 +253,9 @@ func TestEvaluateKeepsInProjectWorkWithoutDirectoryChange(t *testing.T) {
 func TestEvaluateTracksEnvChdirWrapper(t *testing.T) {
 	cfg := mustConfig(t, pathScopeYAML)
 	projectDir := t.TempDir()
-	outsideDir := t.TempDir()
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	outsideDir := filepath.ToSlash(t.TempDir())
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
 	decision, _, source, _ := evaluate(cfg, in, "env -C "+outsideDir+" rm -f target")
@@ -273,7 +280,9 @@ audit:
 `, projectDir))
 	in := hook.Input{ToolName: "Bash", CWD: outsideDir}
 
-	decision, _, source, _ := evaluate(cfg, in, "cd "+projectDir+" & rm -rf ./target")
+	// Shell command text is always forward-slash, so embed the real
+	// project directory that way rather than in the host's native format.
+	decision, _, source, _ := evaluate(cfg, in, "cd "+filepath.ToSlash(projectDir)+" & rm -rf ./target")
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy", decision, source)
 	}
@@ -296,7 +305,9 @@ audit:
   enabled: false
 `, projectDir))
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
-	command := "ln -s " + outsideDir + " escape & rm -rf escape/target"
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	command := "ln -s " + filepath.ToSlash(outsideDir) + " escape & rm -rf escape/target"
 
 	decision, _, source, _ := evaluate(cfg, in, command)
 	if decision != hook.DecisionDeny || source != "path_policy" {

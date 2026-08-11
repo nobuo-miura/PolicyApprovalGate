@@ -119,7 +119,8 @@ func TestTrackCWDRelativeCdChains(t *testing.T) {
 	}
 	cmds := parseCmds(t, "cd sub && cd ../other && rm -rf target")
 	states, _ := TrackCWD(cmds, projectDir, "")
-	want := filepath.Join(projectDir, "other")
+	// TrackCWD always resolves relative cd targets to a forward-slash path.
+	want := filepath.ToSlash(filepath.Join(projectDir, "other"))
 	if states[2].Path != want {
 		t.Errorf("state[2].Path = %q, want %q", states[2].Path, want)
 	}
@@ -152,7 +153,8 @@ func TestTrackCWDSuccessfulCdToRealSubdir(t *testing.T) {
 	}
 	cmds := parseCmds(t, "cd sub; rm -rf target")
 	states, _ := TrackCWD(cmds, projectDir, "")
-	want := filepath.Join(projectDir, "sub")
+	// TrackCWD always resolves relative cd targets to a forward-slash path.
+	want := filepath.ToSlash(filepath.Join(projectDir, "sub"))
 	if states[1].Path != want || states[1].Indeterminate {
 		t.Errorf("state[1] = %+v, want %q (cd to a real subdir should succeed)", states[1], want)
 	}
@@ -161,7 +163,10 @@ func TestTrackCWDSuccessfulCdToRealSubdir(t *testing.T) {
 // Track a not-yet-existing link created earlier in the same command chain.
 func TestTrackCWDFollowsSymlinkCreatedEarlierInChain(t *testing.T) {
 	projectDir := t.TempDir()
-	outsideDir := t.TempDir()
+	// Shell command text is always forward-slash, and TrackCWD resolves
+	// symlink targets to forward-slash paths, so use the same normalized
+	// form both to build the command and to check the result.
+	outsideDir := filepath.ToSlash(t.TempDir())
 	cmds := parseCmds(t, "ln -s "+outsideDir+" escape && cd escape && rm -rf target")
 	states, linksBefore := TrackCWD(cmds, projectDir, "")
 
@@ -181,37 +186,42 @@ func TestTrackCWDFollowsSymlinkCreatedEarlierInChain(t *testing.T) {
 func TestTrackCWDFollowsSymlinkCreatedInsideExistingDirectory(t *testing.T) {
 	projectDir := t.TempDir()
 	outsideDir := t.TempDir()
+	linkName := filepath.Base(outsideDir)
 	linksDir := filepath.Join(projectDir, "links")
 	if err := os.Mkdir(linksDir, 0o755); err != nil {
 		t.Fatalf("mkdir links: %v", err)
 	}
 
-	linkName := filepath.Base(outsideDir)
-	cmds := parseCmds(t, "ln -s "+outsideDir+" links && cd links/"+linkName+" && rm -rf target")
+	// Shell command text is always forward-slash, and TrackCWD resolves
+	// symlink targets to forward-slash paths, so use the same normalized
+	// form both to build the command and to check the result.
+	cmds := parseCmds(t, "ln -s "+filepath.ToSlash(outsideDir)+" links && cd links/"+linkName+" && rm -rf target")
 	states, linksBefore := TrackCWD(cmds, projectDir, "")
 
-	wantLink := filepath.Join(linksDir, linkName)
+	wantLink := filepath.ToSlash(filepath.Join(linksDir, linkName))
+	wantOutsideDir := filepath.ToSlash(outsideDir)
 	if len(linksBefore[2]) != 1 || linksBefore[2][0].Link != wantLink {
 		t.Fatalf("linksBefore[2] = %+v, want link %q", linksBefore[2], wantLink)
 	}
-	if states[2].Path != outsideDir || states[2].Indeterminate {
-		t.Errorf("state[2] = %+v, want %q non-indeterminate", states[2], outsideDir)
+	if states[2].Path != wantOutsideDir || states[2].Indeterminate {
+		t.Errorf("state[2] = %+v, want %q non-indeterminate", states[2], wantOutsideDir)
 	}
 }
 
 func TestTrackCWDHandlesTargetDirectoryOption(t *testing.T) {
 	projectDir := t.TempDir()
 	outsideDir := t.TempDir()
+	linkName := filepath.Base(outsideDir)
 	linksDir := filepath.Join(projectDir, "links")
 	if err := os.Mkdir(linksDir, 0o755); err != nil {
 		t.Fatalf("mkdir links: %v", err)
 	}
 
-	linkName := filepath.Base(outsideDir)
-	cmds := parseCmds(t, "ln -s --target-directory=links "+outsideDir+" && cd links/"+linkName+" && pwd")
+	cmds := parseCmds(t, "ln -s --target-directory=links "+filepath.ToSlash(outsideDir)+" && cd links/"+linkName+" && pwd")
 	states, linksBefore := TrackCWD(cmds, projectDir, "")
-	if states[2].Path != outsideDir {
-		t.Errorf("state[2].Path = %q, want %q; links=%+v", states[2].Path, outsideDir, linksBefore[2])
+	wantOutsideDir := filepath.ToSlash(outsideDir)
+	if states[2].Path != wantOutsideDir {
+		t.Errorf("state[2].Path = %q, want %q; links=%+v", states[2].Path, wantOutsideDir, linksBefore[2])
 	}
 }
 
@@ -229,8 +239,9 @@ func TestTrackCWDResolvesRelativeSymlinkTargetFromLinkDirectory(t *testing.T) {
 
 	cmds := parseCmds(t, "ln -s ../../outside links/escape && cd links/escape && pwd")
 	states, linksBefore := TrackCWD(cmds, projectDir, "")
-	if states[2].Path != outsideDir {
-		t.Errorf("state[2].Path = %q, want %q; links=%+v", states[2].Path, outsideDir, linksBefore[2])
+	wantOutsideDir := filepath.ToSlash(outsideDir)
+	if states[2].Path != wantOutsideDir {
+		t.Errorf("state[2].Path = %q, want %q; links=%+v", states[2].Path, wantOutsideDir, linksBefore[2])
 	}
 }
 

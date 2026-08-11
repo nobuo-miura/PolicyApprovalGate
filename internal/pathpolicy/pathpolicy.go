@@ -577,7 +577,7 @@ func makePendingSymlink(cur CWDState, home, source, linkPath string, pending []S
 	}
 	link := RewriteThroughPending(Resolve(cur.Path, home, linkPath), pending)
 	targetBase := posixpath.Dir(link)
-	if posixpath.IsAbs(source) || source == "~" || strings.HasPrefix(source, "~/") {
+	if isAbsPath(source) || source == "~" || strings.HasPrefix(source, "~/") {
 		targetBase = cur.Path
 	}
 	return &Symlink{
@@ -596,15 +596,28 @@ func Resolve(cwd, home, path string) string {
 	}
 	cwd = filepath.ToSlash(cwd)
 	home = filepath.ToSlash(home)
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		if home != "" {
-			path = posixpath.Join(home, strings.TrimPrefix(path, "~"))
-		}
+	if (path == "~" || strings.HasPrefix(path, "~/")) && home != "" {
+		// home is already a resolved, absolute location (posix or a native
+		// Windows path with a drive letter); posixpath.IsAbs cannot tell a
+		// drive-lettered path is absolute, so return directly instead of
+		// re-running it through the absoluteness check below.
+		return posixpath.Clean(posixpath.Join(home, strings.TrimPrefix(path, "~")))
 	}
-	if !posixpath.IsAbs(path) {
+	if !isAbsPath(path) {
 		path = posixpath.Join(cwd, path)
 	}
 	return posixpath.Clean(path)
+}
+
+// isAbsPath reports whether p is already an absolute location. p is
+// ordinarily POSIX-style shell text, where a leading "/" is the only
+// absolute form, but on Windows a command may also name a real host
+// location as a drive-absolute or UNC path (e.g. "C:/Users/x"), which
+// posixpath.IsAbs cannot recognize. filepath.IsAbs is native-OS-aware and,
+// on Windows, accepts forward slashes too; on POSIX systems it agrees with
+// posixpath.IsAbs, so this adds coverage without changing behavior there.
+func isAbsPath(p string) bool {
+	return posixpath.IsAbs(p) || filepath.IsAbs(p)
 }
 
 // ResolvePhysical resolves symlinks in the longest existing ancestor and
