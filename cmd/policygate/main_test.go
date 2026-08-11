@@ -90,9 +90,13 @@ audit:
 func TestEvaluateFollowsCdBeforeClassifyingPaths(t *testing.T) {
 	cfg := mustConfig(t, pathScopeYAML)
 	projectDir := t.TempDir()
+	// A real, guaranteed-to-exist directory outside the project, expressed as
+	// shell text (forward slashes) rather than a platform-specific path like
+	// /tmp, which is not guaranteed to exist on every CI runner.
+	outsideDir := filepath.ToSlash(t.TempDir())
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
-	decision, _, source, _ := evaluate(cfg, in, "cd /tmp && rm -rf harmless-review-target")
+	decision, _, source, _ := evaluate(cfg, in, fmt.Sprintf("cd %s && rm -rf harmless-review-target", outsideDir))
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy for a delete outside the project via cd", decision, source)
 	}
@@ -134,7 +138,9 @@ func TestEvaluateHandlesFailedCd(t *testing.T) {
 func TestEvaluateFollowsSymlinkCreatedEarlierInChain(t *testing.T) {
 	cfg := mustConfig(t, pathScopeYAML)
 	projectDir := t.TempDir()
-	outsideDir := t.TempDir()
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	outsideDir := filepath.ToSlash(t.TempDir())
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
 	for _, cmd := range []string{
@@ -152,11 +158,14 @@ func TestEvaluateFollowsSymlinkCreatedInsideExistingDirectory(t *testing.T) {
 	cfg := mustConfig(t, pathScopeYAML)
 	projectDir := t.TempDir()
 	outsideDir := t.TempDir()
+	outsideBase := filepath.Base(outsideDir)
 	if err := os.Mkdir(filepath.Join(projectDir, "links"), 0o755); err != nil {
 		t.Fatalf("mkdir links: %v", err)
 	}
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
-	cmd := "ln -s " + outsideDir + " links && cd links/" + filepath.Base(outsideDir) + " && rm -rf target"
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	cmd := "ln -s " + filepath.ToSlash(outsideDir) + " links && cd links/" + outsideBase + " && rm -rf target"
 
 	decision, _, source, _ := evaluate(cfg, in, cmd)
 	if decision != hook.DecisionDeny || source != "path_policy" {
@@ -244,7 +253,9 @@ func TestEvaluateKeepsInProjectWorkWithoutDirectoryChange(t *testing.T) {
 func TestEvaluateTracksEnvChdirWrapper(t *testing.T) {
 	cfg := mustConfig(t, pathScopeYAML)
 	projectDir := t.TempDir()
-	outsideDir := t.TempDir()
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	outsideDir := filepath.ToSlash(t.TempDir())
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
 	decision, _, source, _ := evaluate(cfg, in, "env -C "+outsideDir+" rm -f target")
@@ -269,7 +280,9 @@ audit:
 `, projectDir))
 	in := hook.Input{ToolName: "Bash", CWD: outsideDir}
 
-	decision, _, source, _ := evaluate(cfg, in, "cd "+projectDir+" & rm -rf ./target")
+	// Shell command text is always forward-slash, so embed the real
+	// project directory that way rather than in the host's native format.
+	decision, _, source, _ := evaluate(cfg, in, "cd "+filepath.ToSlash(projectDir)+" & rm -rf ./target")
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy", decision, source)
 	}
@@ -292,7 +305,9 @@ audit:
   enabled: false
 `, projectDir))
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
-	command := "ln -s " + outsideDir + " escape & rm -rf escape/target"
+	// Shell command text is always forward-slash, so embed the real temp
+	// directory that way rather than in the host's native format.
+	command := "ln -s " + filepath.ToSlash(outsideDir) + " escape & rm -rf escape/target"
 
 	decision, _, source, _ := evaluate(cfg, in, command)
 	if decision != hook.DecisionDeny || source != "path_policy" {
@@ -470,6 +485,15 @@ func TestEvaluateBlocksRecursiveForceDeleteOfRootOrHomeAcrossFlagForms(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A real, guaranteed-to-exist child of home, so "cd <dir> && rm .. "
+	// reaches home the same way on every platform without depending on a
+	// platform-specific directory such as /tmp.
+	homeChild, err := os.MkdirTemp(home, "policygate-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(homeChild) })
+	homeChild = filepath.ToSlash(homeChild)
 
 	tests := []struct {
 		cwd     string
@@ -481,10 +505,10 @@ func TestEvaluateBlocksRecursiveForceDeleteOfRootOrHomeAcrossFlagForms(t *testin
 		{cwd: home, command: "rm --recursive -f ~/./"},
 		{cwd: home, command: "rm --recursive --force ~"},
 		{cwd: home, command: "rm --force --recursive -- ~"},
-		{cwd: string(filepath.Separator), command: "rm -r -f /"},
-		{cwd: string(filepath.Separator), command: "command /bin/rm -R -f /tmp/.."},
-		{cwd: home, command: "cd /tmp && rm -r --force .."},
-		{cwd: string(filepath.Separator), command: `rm -r -f "/"`},
+		{cwd: "/", command: "rm -r -f /"},
+		{cwd: "/", command: "command /bin/rm -R -f /tmp/.."},
+		{cwd: home, command: fmt.Sprintf("cd %s && rm -r --force ..", homeChild)},
+		{cwd: "/", command: `rm -r -f "/"`},
 		{cwd: home, command: `bash -c 'rm -r -f ~'`},
 		{cwd: home, command: `env sh -c "rm --recursive --force ~"`},
 		{cwd: home, command: `eval 'rm -r --force ~'`},
