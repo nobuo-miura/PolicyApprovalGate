@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
@@ -46,13 +48,40 @@ func TestSelfProtectionSurvivesEveryPathCheckBeingDisabled(t *testing.T) {
 		"install -m 0755 evil /opt/homebrew/bin/policygate",
 		`sh -c "rm -f /opt/homebrew/bin/policygate"`,
 		"env rm -f /opt/homebrew/bin/policygate",
-		"cd /opt/homebrew/bin && rm -f policygate",
 	}
 	for _, cmd := range cases {
 		decision, reason, source, _ := evaluate(cfg, in, cmd)
 		if decision != hook.DecisionDeny || source != "self_protection" {
 			t.Errorf("evaluate(%q) = %q/%q (%s), want deny/self_protection", cmd, decision, source, reason)
 		}
+	}
+}
+
+// Naming the binary relative to an earlier cd only resolves when the directory
+// really exists, so this case needs a real one. Hard-coding an install path
+// made it pass on a Mac with Homebrew and fail everywhere else.
+func TestSelfProtectionFollowsAnEarlierCd(t *testing.T) {
+	cfg := mustConfig(t, everyPathCheckOffYAML)
+
+	dir := t.TempDir()
+	// Guard both spellings, as resolveSelfPaths does: on macOS the temp
+	// directory is reached through a symlink, and only the resolved form
+	// matches a path the analyzer has resolved.
+	physical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "policygate"
+	if runtime.GOOS == "windows" {
+		name = "policygate.exe"
+	}
+	logical := filepath.ToSlash(dir) + "/" + name
+	guardSelf(t, logical, filepath.ToSlash(physical)+"/"+name)
+
+	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
+	cmd := fmt.Sprintf("cd %s && rm -f %s", filepath.ToSlash(dir), name)
+	if decision, reason, source, _ := evaluate(cfg, in, cmd); decision != hook.DecisionDeny || source != "self_protection" {
+		t.Errorf("evaluate(%q) = %q/%q (%s), want deny/self_protection", cmd, decision, source, reason)
 	}
 }
 
