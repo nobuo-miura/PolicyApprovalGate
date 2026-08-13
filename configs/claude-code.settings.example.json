@@ -9,6 +9,15 @@
             "command": "/usr/local/bin/policygate --host claude"
           }
         ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/policygate --host claude"
+          }
+        ]
       }
     ]
   }

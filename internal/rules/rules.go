@@ -80,6 +80,26 @@ type ProtectedBranchesConfig struct {
 // ActionConfig defines the fallback for unmatched or unparseable commands.
 type ActionConfig struct {
 	Action string `yaml:"action"` // "defer" | "ask" | "deny"
+
+	// UnanalyzedAction replaces Action when the command's dialect has no
+	// structural analysis behind it.
+	//
+	// The two cases look identical in the result and mean opposite things. For
+	// a POSIX command, reaching the fallback means it was parsed, its paths
+	// were classified, and nothing applied. For PowerShell there is no parse
+	// and no classification, so reaching the fallback means only that no text
+	// rule happened to match - the command was never understood. Deferring both
+	// treats "we looked and it was ordinary" the same as "we did not look".
+	UnanalyzedAction string `yaml:"unanalyzed_action"` // "defer" | "ask" | "deny"
+}
+
+// For returns the action to apply. An empty unanalyzed_action falls back to
+// action, so a configuration written before the field existed keeps working.
+func (a ActionConfig) For(analyzable bool) string {
+	if !analyzable && a.UnanalyzedAction != "" {
+		return a.UnanalyzedAction
+	}
+	return a.Action
 }
 
 // AuditConfig controls JSON Lines audit logging.
@@ -217,6 +237,47 @@ func Upgrade(data []byte) ([]byte, []string, error) {
 // than merging into it, so without this an upgrade would never deliver rules
 // added to a later release. Rules are matched by pattern, and a restored rule
 // can simply be deleted again after the upgrade.
+// MissingDefaultRules counts the built-in rules a configuration no longer
+// carries, per section.
+//
+// A user configuration replaces a rule list wholesale, so a file written before
+// a release simply does not have the rules that release added, and nothing says
+// so: the gate runs, reports no error, and quietly enforces less than the
+// documentation describes. Someone whose configuration predates the PowerShell
+// rules is not protected by them until they upgrade, and would have no way to
+// find that out.
+func (c *Config) MissingDefaultRules() (map[string]int, error) {
+	defaults, err := Default()
+	if err != nil {
+		return nil, fmt.Errorf("load embedded defaults: %w", err)
+	}
+	missing := map[string]int{}
+	for _, section := range []struct {
+		name    string
+		have    []Rule
+		builtin []Rule
+	}{
+		{"deny", c.Deny, defaults.Deny},
+		{"sensitive_paths.patterns", c.SensitivePaths.Patterns, defaults.SensitivePaths.Patterns},
+		{"protected_paths.patterns", c.ProtectedPaths.Patterns, defaults.ProtectedPaths.Patterns},
+	} {
+		present := make(map[string]bool, len(section.have))
+		for _, rule := range section.have {
+			present[rule.Pattern] = true
+		}
+		count := 0
+		for _, rule := range section.builtin {
+			if !present[rule.Pattern] {
+				count++
+			}
+		}
+		if count > 0 {
+			missing[section.name] = count
+		}
+	}
+	return missing, nil
+}
+
 func (c *Config) restoreMissingDefaultRules() ([]string, error) {
 	defaults, err := Default()
 	if err != nil {
@@ -306,8 +367,14 @@ func (c *Config) validate() error {
 	if !oneOf(c.Unknown.Action, "", "defer", "ask", "deny") {
 		errs = append(errs, fmt.Sprintf("unknown.action: invalid value %q (want defer, ask, or deny)", c.Unknown.Action))
 	}
+	if !oneOf(c.Unknown.UnanalyzedAction, "", "defer", "ask", "deny") {
+		errs = append(errs, fmt.Sprintf("unknown.unanalyzed_action: invalid value %q (want defer, ask, or deny)", c.Unknown.UnanalyzedAction))
+	}
 	if !oneOf(c.ParseError.Action, "", "defer", "ask", "deny") {
 		errs = append(errs, fmt.Sprintf("parse_error.action: invalid value %q (want defer, ask, or deny)", c.ParseError.Action))
+	}
+	if !oneOf(c.ParseError.UnanalyzedAction, "", "defer", "ask", "deny") {
+		errs = append(errs, fmt.Sprintf("parse_error.unanalyzed_action: invalid value %q (want defer, ask, or deny)", c.ParseError.UnanalyzedAction))
 	}
 	if !oneOf(c.Audit.CommandMode, "redacted", "full", "hash", "none") {
 		errs = append(errs, fmt.Sprintf("audit.command_mode: invalid value %q (want redacted, full, hash, or none)", c.Audit.CommandMode))
@@ -365,10 +432,25 @@ func (c *Config) compile() error {
 	return nil
 }
 
+// compileRules compiles one section's patterns, all of them case-insensitively.
+//
+// Both halves of the policy need the folding, because a case-insensitive
+// filesystem defeats a case-sensitive pattern twice over. It resolves .ENV to
+// the file a rule written for .env guards, and it resolves RM through PATH to
+// the same binary as rm, which would leave every deny rule one shifted key away
+// from useless. Windows always works this way, and so does the default APFS
+// configuration on macOS.
+//
+// Folding on a genuinely case-sensitive filesystem costs a false positive: a
+// distinct file or program whose name differs only by case. That is vanishingly
+// rare, and it is the direction a gate should fail in.
 func compileRules(rules []Rule, section string) error {
 	for i := range rules {
-		re, err := regexp.Compile(rules[i].Pattern)
+		// RE2 applies a leading (?i) to the rest of the expression. An inline
+		// (?-i) written by the user still wins inside its own group.
+		re, err := regexp.Compile("(?i)" + rules[i].Pattern)
 		if err != nil {
+			// Report the pattern as written, not the folded rewrite.
 			return fmt.Errorf("compile %s rule %q: %w", section, rules[i].Pattern, err)
 		}
 		rules[i].compiled = re

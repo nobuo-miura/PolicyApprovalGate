@@ -1,8 +1,10 @@
 package pathpolicy
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
 
@@ -149,4 +151,184 @@ func FuzzClassifyDoesNotPanic(f *testing.F) {
 			_ = Classify(command)
 		}
 	})
+}
+
+// Containment on a root that cannot be probed - one that does not exist -
+// falls back to the platform default. The behaviour on a real filesystem is
+// covered by TestIsOutsideFollowsTheProjectFilesystem.
+func TestIsOutsideOnAnUnprobeableRoot(t *testing.T) {
+	const root = "/Users/user/Project"
+
+	if IsOutside(root, root) {
+		t.Errorf("the root is not outside itself")
+	}
+	if IsOutside(root, root+"/src/main.go") {
+		t.Errorf("an exact-case child was reported outside %q", root)
+	}
+
+	mixed := "/users/user/project/src/main.go"
+	if got := IsOutside(root, mixed); got == paths.FSIgnoresCase {
+		t.Errorf("IsOutside(%q, %q) = %v, want the platform fallback to apply",
+			root, mixed, got)
+	}
+
+	// Folding case must not turn a prefix-sharing sibling into a child.
+	if !IsOutside(root, "/users/user/project-evil/x") {
+		t.Errorf("prefix-sharing sibling was reported inside %q", root)
+	}
+	// Nor may it swallow an unrelated tree of the same length.
+	if !IsOutside(root, "/Users/user/Другое/x") {
+		t.Errorf("unrelated path was reported inside %q", root)
+	}
+}
+
+// A POSIX command on Windows can still reach Win32, which drops a trailing dot
+// or space and reads a name:stream suffix as a stream of that same file. The
+// host's answer is passed in rather than read from runtime.GOOS so that both
+// branches are covered wherever the suite runs; a Windows-only assertion would
+// be silently vacuous on the Mac and Linux runners.
+func TestResolveDropsWin32NameDecorations(t *testing.T) {
+	const cwd = "/home/user/project"
+	const home = "/home/user"
+
+	cases := []struct {
+		name    string
+		path    string
+		windows string
+		posix   string
+	}{
+		{"trailing dot", ".env.", cwd + "/.env", cwd + "/.env."},
+		{"several trailing dots", ".env...", cwd + "/.env", cwd + "/.env..."},
+		{"trailing space", ".env ", cwd + "/.env", cwd + "/.env "},
+		{"dot and space", ".env. ", cwd + "/.env", cwd + "/.env. "},
+		{"explicitly relative", "./.env.", cwd + "/.env", cwd + "/.env."},
+		{"alternate data stream", ".env:hidden", cwd + "/.env", cwd + "/.env:hidden"},
+		{"default stream", ".env::$DATA", cwd + "/.env", cwd + "/.env::$DATA"},
+		{"under the home directory", "~/.ssh/id_rsa.", home + "/.ssh/id_rsa", home + "/.ssh/id_rsa."},
+		{"absolute", "/etc/passwd.", "/etc/passwd", "/etc/passwd."},
+		{"decorated parent", "sub./file", cwd + "/sub/file", cwd + "/sub./file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolve(cwd, home, tc.path, true); got != tc.windows {
+				t.Errorf("resolve(%q, windows) = %q, want %q", tc.path, got, tc.windows)
+			}
+			if got := resolve(cwd, home, tc.path, false); got != tc.posix {
+				t.Errorf("resolve(%q, posix) = %q, want %q", tc.path, got, tc.posix)
+			}
+		})
+	}
+}
+
+// Trimming must not consume a name outright, and the relative markers are names
+// of their own: turning `..` into an empty component would resolve a path to
+// somewhere the command never named.
+func TestResolveKeepsPathsThatAreOnlyDecoration(t *testing.T) {
+	const cwd = "/home/user/project"
+
+	cases := []struct{ path, want string }{
+		{"..", "/home/user"},
+		{"../.env", "/home/user/.env"},
+		{".", cwd},
+		{"...", cwd + "/..."},
+		{" ", cwd + "/ "},
+		{"", ""},
+		// The critical-delete check recognizes `rm -rf /` by comparing the
+		// resolved path against "/", so a root that trims to "" disarms it.
+		{"/", "/"},
+		{"/tmp/..", "/"},
+		{"../../../..", "/"},
+	}
+	for _, tc := range cases {
+		if got := resolve(cwd, "/home/user", tc.path, true); got != tc.want {
+			t.Errorf("resolve(%q, windows) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+// A path holding an unexpanded variable is never resolved, so the undecorated
+// spelling has to be reachable on its own.
+func TestTrimHostNameDecorations(t *testing.T) {
+	const decorated = "$DIR/.env."
+
+	if got := trimHostNameDecorations(decorated, true); got != "$DIR/.env" {
+		t.Errorf("trimHostNameDecorations(%q, windows) = %q, want %q", decorated, got, "$DIR/.env")
+	}
+	if got := trimHostNameDecorations(decorated, false); got != decorated {
+		t.Errorf("trimHostNameDecorations(%q, posix) = %q, want it unchanged", decorated, got)
+	}
+	if got := trimHostNameDecorations("", true); got != "" {
+		t.Errorf("trimHostNameDecorations(%q, windows) = %q, want it unchanged", "", got)
+	}
+}
+
+// The exported entry points must agree with the platform they were built for,
+// or the branch the suite exercises would not be the one that runs.
+func TestResolveMatchesThisPlatform(t *testing.T) {
+	got := Resolve("/home/user/project", "/home/user", ".env.")
+	want := "/home/user/project/.env."
+	if paths.FSDropsNameDecorations {
+		want = "/home/user/project/.env"
+	}
+	if got != want {
+		t.Errorf("Resolve(%q) = %q, want %q", ".env.", got, want)
+	}
+	if got := TrimHostNameDecorations("$DIR/.env."); (got == "$DIR/.env") != paths.FSDropsNameDecorations {
+		t.Errorf("TrimHostNameDecorations(%q) = %q, which disagrees with FSDropsNameDecorations=%v",
+			"$DIR/.env.", got, paths.FSDropsNameDecorations)
+	}
+}
+
+// 2>&1 names a file descriptor, not a file. Read as one it reports a write to
+// a file called "1", so every `go build ./... 2>&1` needs approving - reported
+// from real use on Windows, where an unresolved cd made it surface.
+func TestClassifyIgnoresDescriptorDuplication(t *testing.T) {
+	for _, cmd := range []string{"ls 2>&1", "go build ./... 2>&1", "ls 1>&2", "ls 2>&-"} {
+		for _, access := range classify(t, cmd) {
+			if access.Path == "1" || access.Path == "2" || access.Path == "-" {
+				t.Errorf("classify(%q) reported %+v, want no file access", cmd, access)
+			}
+		}
+	}
+
+	// bash reads >&name as a redirection to that file, so only a numeric
+	// operand may be dismissed.
+	found := false
+	for _, access := range classify(t, "ls >&out.log") {
+		if access.Path == "out.log" && access.Op == OpWrite {
+			found = true
+		}
+	}
+	if !found {
+		t.Error(`classify("ls >&out.log") lost the write to out.log`)
+	}
+}
+
+// Writing to /dev/null touches no file, so asking about where it sits
+// interrupts commands as ordinary as `ls foo 2>/dev/null`.
+func TestClassifyIgnoresHarmlessPseudoDevices(t *testing.T) {
+	for _, cmd := range []string{
+		"ls foo 2>/dev/null",
+		"go build ./... >/dev/null 2>/dev/null",
+		"echo hi > /dev/stdout",
+		"cat x > /dev/fd/3",
+	} {
+		for _, access := range classify(t, cmd) {
+			if strings.HasPrefix(access.Path, "/dev/") {
+				t.Errorf("classify(%q) reported %+v, want the pseudo-device ignored", cmd, access)
+			}
+		}
+	}
+
+	// A real device is not harmless, and the deny rules that cover it match on
+	// the path, so it has to survive classification.
+	found := false
+	for _, access := range classify(t, "echo x > /dev/sda") {
+		if access.Path == "/dev/sda" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error(`classify("echo x > /dev/sda") dropped a real block device`)
+	}
 }

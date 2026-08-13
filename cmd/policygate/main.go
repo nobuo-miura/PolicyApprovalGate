@@ -10,13 +10,16 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/nobuo-miura/policyapprovalgate/internal/audit"
+	"github.com/nobuo-miura/policyapprovalgate/internal/dialect"
 	"github.com/nobuo-miura/policyapprovalgate/internal/gitpush"
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
 	"github.com/nobuo-miura/policyapprovalgate/internal/pathpolicy"
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
@@ -26,6 +29,10 @@ func main() {
 		switch os.Args[1] {
 		case "init":
 			os.Exit(runInit())
+		case "install-hook":
+			os.Exit(runInstallHook(os.Args[2:]))
+		case "uninstall-hook":
+			os.Exit(runUninstallHook(os.Args[2:]))
 		case "check-config":
 			os.Exit(runCheckConfig(os.Args[2:]))
 		case "doctor":
@@ -51,19 +58,27 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `policygate applies a deterministic policy to PreToolUse hook calls.
 
 Usage:
-  policygate [--host claude|codex]           Evaluate one PreToolUse payload from stdin
-  policygate observe [--host claude|codex]   Record a decision without enforcing it
+  policygate [--host claude|codex] [--config PATH]
+                                             Evaluate one PreToolUse payload from stdin
+  policygate observe [--host claude|codex] [--config PATH]
+                                             Record a decision without enforcing it
   policygate init [--upgrade]                Create or upgrade the user configuration
+  policygate install-hook --host claude|codex [--user] [--path PATH] [--config PATH] [--dry-run]
+                                             Register this binary as a PreToolUse hook
+  policygate uninstall-hook --host claude|codex [--user] [--path PATH] [--dry-run]
+                                             Remove the registration
   policygate check-config [--config PATH]    Validate a configuration file
   policygate doctor                          Print version, host, and configuration status
-  policygate evaluate --command CMD [--cwd DIR] [--host claude|codex]
+  policygate evaluate --command CMD [--cwd DIR] [--host claude|codex] [--tool NAME]
                                              Evaluate a command without executing it
   policygate version                         Print the version
   policygate help                            Print this message
 
 Environment:
-  POLICYGATE_CONFIG  Configuration file path (default ~/.policygate/config.yaml)
+  POLICYGATE_CONFIG  Configuration file path (default ~/.policygate/config.yaml).
+                     A --config flag takes precedence.
   POLICYGATE_HOST    Host behavior applied when --host is omitted
+  POLICYGATE_SHELL   Shell dialect (posix or powershell); overrides detection
 `)
 }
 
@@ -84,12 +99,12 @@ func checkHookArgs(args []string) error {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case arg == "--host":
+		case arg == "--host", arg == "--config":
 			if i+1 >= len(args) {
-				return fmt.Errorf("--host requires a value")
+				return fmt.Errorf("%s requires a value", arg)
 			}
 			i++
-		case strings.HasPrefix(arg, "--host="):
+		case strings.HasPrefix(arg, "--host="), strings.HasPrefix(arg, "--config="):
 		default:
 			return fmt.Errorf("unknown argument %q", arg)
 		}
@@ -108,14 +123,10 @@ func runInit() int {
 		}
 		upgrade = true
 	}
-	path := os.Getenv("POLICYGATE_CONFIG")
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "policygate init: resolve home dir: %v\n", err)
-			return 1
-		}
-		path = filepath.Join(home, ".policygate", "config.yaml")
+	path, err := paths.ConfigTarget()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "policygate init: resolve home dir: %v\n", err)
+		return 1
 	}
 
 	if _, err := os.Stat(path); err == nil {
@@ -181,10 +192,12 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 	}
 
 	cmd := strings.TrimSpace(in.ToolInput.Command)
-	if in.ToolName != "Bash" || cmd == "" {
+	if !carriesShellCommand(in.ToolName) || cmd == "" {
 		return 0
 	}
 	in.CWD = resolveCWD(in.CWD)
+	shell := resolveDialect(host, in.ToolName)
+	warnOnDialectMismatch(shell, cmd)
 	if configErr != nil {
 		reason := "policy configuration could not be loaded: " + configErr.Error()
 		warnf("%s", reason)
@@ -196,7 +209,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 		return 0
 	}
 
-	decision, reason, source, matchedBy := evaluate(cfg, in, cmd)
+	decision, reason, source, matchedBy := evaluate(cfg, in, cmd, shell)
 	decision, reason = finalizeForHost(host, decision, reason)
 	predictedDecision := decision
 	observe := observeOverride || cfg.Mode == "observe"
@@ -219,6 +232,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 			Decision:  string(predictedDecision),
 			Reason:    reason,
 			MatchedBy: matchedBy,
+			Dialect:   string(shell),
 		}
 		if observe {
 			rec.Source = "observe:" + rec.Source
@@ -233,7 +247,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 
 // evaluate returns the host decision and audit metadata. Explicit denials take
 // priority and unmatched commands delegate to host approval.
-func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decision, reason, source, matchedBy string) {
+func evaluate(cfg *rules.Config, in hook.Input, cmd string, shell dialect.Dialect) (decision hook.Decision, reason, source, matchedBy string) {
 	// Match the whole command with quoted and escaped text masked out, so a
 	// separator inside an argument cannot pose as the start of a command.
 	if r := cfg.MatchDeny(maskQuotedText(cmd)); r != nil {
@@ -244,7 +258,7 @@ func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decis
 	if parseErr != nil {
 		// Do not guess when invalid syntax prevents structural analysis.
 		warnf("parse command for analysis: %v", parseErr)
-		d, r := actionDecision(cfg.ParseError, "could not analyze command structure: "+parseErr.Error())
+		d, r := actionDecision(cfg.ParseError, shell, "could not analyze command structure: "+parseErr.Error())
 		return d, r, "parse_error", ""
 	}
 
@@ -285,12 +299,12 @@ func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decis
 		}
 	}
 
-	if d, r, matched := strictestPathAccess(cfg, subcmds, in.CWD, nested); d != "" {
+	if d, r, src, matched := strictestPathAccess(cfg, subcmds, cmd, in.CWD, nested, shell); d != "" {
 		switch d {
 		case "deny":
-			return hook.DecisionDeny, r, "path_policy", matched
+			return hook.DecisionDeny, r, src, matched
 		case "ask":
-			return hook.DecisionAsk, r, "path_policy", matched
+			return hook.DecisionAsk, r, src, matched
 		}
 	}
 
@@ -307,7 +321,7 @@ func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decis
 	}
 
 	// Delegate to the configured unknown-command fallback.
-	d, r := actionDecision(cfg.Unknown, "no rule matched")
+	d, r := actionDecision(cfg.Unknown, shell, unmatchedReason(shell))
 	return d, r, "unknown", ""
 }
 
@@ -418,7 +432,7 @@ func nestedScriptGroups(subcmds []shellparse.Command, startCWD string, depth int
 	if depth >= maxNestedShellDepth {
 		return nil
 	}
-	home, _ := os.UserHomeDir()
+	home := paths.Home()
 	states, _ := pathpolicy.TrackCWD(subcmds, startCWD, home)
 	var out []nestedScriptGroup
 	for i, sc := range subcmds {
@@ -451,18 +465,24 @@ func parseNestedScript(cmd shellparse.Command) ([]shellparse.Command, bool) {
 
 // strictestPathAccess returns the strictest path decision across the command
 // itself and every literal script it reaches.
-func strictestPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string, nested []nestedScriptGroup) (decision, reason, matchedBy string) {
+func strictestPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cmd, cwd string, nested []nestedScriptGroup, shell dialect.Dialect) (decision, reason, source, matchedBy string) {
+	home := paths.Home()
+	if shell == dialect.PowerShell {
+		// The nested groups are POSIX constructs, recovered from a literal
+		// sh -c; there is nothing equivalent to walk into here.
+		return checkPathAccess(cfg, powerShellAccesses(cmd, cwd), cwd)
+	}
 	best := 0
-	consider := func(d, r, m string) {
+	consider := func(d, r, s, m string) {
 		if rank := decisionRank(d); rank > best {
-			best, decision, reason, matchedBy = rank, d, r, m
+			best, decision, reason, source, matchedBy = rank, d, r, s, m
 		}
 	}
-	consider(checkPathAccess(cfg, subcmds, cwd))
+	consider(checkPathAccess(cfg, posixAccesses(subcmds, cwd, home), cwd))
 	for _, group := range nested {
-		consider(checkPathAccess(cfg, group.commands, group.cwd))
+		consider(checkPathAccess(cfg, posixAccesses(group.commands, group.cwd, home), group.cwd))
 	}
-	return decision, reason, matchedBy
+	return decision, reason, source, matchedBy
 }
 
 // checkCriticalDeletes enforces a non-configurable baseline against recursively
@@ -479,7 +499,7 @@ func checkCriticalDeletesContext(subcmds []shellparse.Command, startCWD string, 
 	if depth >= maxNestedShellDepth {
 		return true, "nested shell analysis depth exceeded while checking critical deletion"
 	}
-	home, _ := os.UserHomeDir()
+	home := paths.Home()
 	states, _ := pathpolicy.TrackCWD(subcmds, startCWD, home)
 	for i, original := range subcmds {
 		cmd := shellparse.Unwrap(original)
@@ -620,8 +640,17 @@ func literalNestedShellScript(name string, argv []string) (string, bool) {
 }
 
 // actionDecision maps a configured fallback action to a host decision.
-func actionDecision(a rules.ActionConfig, reason string) (hook.Decision, string) {
-	switch a.Action {
+// unmatchedReason says why nothing matched, because the two cases mean opposite
+// things and the user reading the prompt has to be able to tell them apart.
+func unmatchedReason(shell dialect.Dialect) string {
+	if shell.Analyzable() {
+		return "no rule matched"
+	}
+	return fmt.Sprintf("no rule matched, and %s is not fully parsed: policygate could not establish what this command touches", shell)
+}
+
+func actionDecision(a rules.ActionConfig, shell dialect.Dialect, reason string) (hook.Decision, string) {
+	switch a.For(shell.Analyzable()) {
 	case "ask":
 		return hook.DecisionAsk, reason
 	case "deny":
@@ -664,15 +693,60 @@ func checkProtectedBranches(cfg *rules.Config, subcmds []shellparse.Command, cwd
 	return gitpush.Verdict{}
 }
 
+// trackedAccess is one path access together with what is known about the
+// working directory it is resolved against.
+type trackedAccess struct {
+	access pathpolicy.Access
+	state  pathpolicy.CWDState
+	links  []pathpolicy.Symlink
+}
+
+// trackedAccesses collects the path accesses of a command in whichever dialect
+// it is written.
+//
+// The POSIX path is the parsed one, with the working directory followed through
+// the chain and symbolic links resolved. PowerShell has no parse to work from,
+// so its accesses come from ClassifyPowerShell and carry only the working
+// directory the hook reported: a cd there is reported by marking the paths that
+// follow it indeterminate rather than by computing where it landed.
+func posixAccesses(subcmds []shellparse.Command, cwd, home string) []trackedAccess {
+	cwdStates, linksBefore := pathpolicy.TrackCWD(subcmds, cwd, home)
+	var out []trackedAccess
+	for i, sc := range subcmds {
+		for _, acc := range pathpolicy.Classify(sc) {
+			out = append(out, trackedAccess{access: acc, state: cwdStates[i], links: linksBefore[i]})
+		}
+	}
+	return out
+}
+
+// powerShellAccesses reads the paths straight out of the command text.
+//
+// There is no parse to follow the working directory through, so every access
+// resolves against the directory the hook reported. ClassifyPowerShell reports
+// a directory change by marking the relative paths after it indeterminate,
+// which is the honest answer: the analysis cannot say where they landed.
+func powerShellAccesses(cmd, cwd string) []trackedAccess {
+	state := pathpolicy.CWDState{Path: cwd}
+	var out []trackedAccess
+	for _, acc := range pathpolicy.ClassifyPowerShell(cmd) {
+		out = append(out, trackedAccess{access: acc, state: state})
+	}
+	return out
+}
+
 // checkPathAccess returns the strictest path-scope, sensitive-path, or
 // protected-path result across all simple commands. It tracks CWD changes and
 // both existing and pending symbolic links.
-func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string) (decision, reason, matchedBy string) {
-	if !cfg.PathScope.Enabled && !cfg.SensitivePaths.Enabled && !cfg.ProtectedPaths.Enabled {
-		return "", "", ""
+func checkPathAccess(cfg *rules.Config, accesses []trackedAccess, cwd string) (decision, reason, source, matchedBy string) {
+	// Self-protection is structural and has no configuration to disable, so it
+	// keeps this function alive even when every configured path check is off.
+	self := selfPaths()
+	if !cfg.PathScope.Enabled && !cfg.SensitivePaths.Enabled && !cfg.ProtectedPaths.Enabled && len(self) == 0 {
+		return "", "", "", ""
 	}
 
-	home, _ := os.UserHomeDir()
+	home := paths.Home()
 	root := cwd
 	if cfg.PathScope.ProjectRoot != "" && cfg.PathScope.ProjectRoot != "cwd" {
 		root = cfg.PathScope.ProjectRoot
@@ -684,21 +758,33 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 		rootLabel = "outside the project root, which could not be determined"
 	}
 
-	cwdStates, linksBefore := pathpolicy.TrackCWD(subcmds, cwd, home)
-
 	best := 0 // 0 none, 1 ask, 2 deny
-	for i, sc := range subcmds {
-		state := cwdStates[i]
-		links := linksBefore[i]
-		for _, acc := range pathpolicy.Classify(sc) {
+	for _, tracked := range accesses {
+		acc, state, links := tracked.access, tracked.state, tracked.links
+		{
 			indeterminate := acc.Indeterminate || state.Indeterminate
 
-			var pathCandidates []string
-			if cfg.SensitivePaths.Enabled || cfg.ProtectedPaths.Enabled {
-				pathCandidates = []string{acc.Path}
-				if !indeterminate {
-					rewritten := pathpolicy.RewriteThroughPending(pathpolicy.Resolve(state.Path, home, acc.Path), links)
-					pathCandidates = append(pathCandidates, pathpolicy.ResolvePhysical(rewritten))
+			// Always resolved: self-protection needs the candidates even when
+			// every configured path check is disabled.
+			pathCandidates := []string{acc.Path}
+			// An unresolved path is only ever matched as written, so the
+			// spelling Win32 will actually open has to be offered too.
+			if trimmed := pathpolicy.TrimHostNameDecorations(acc.Path); trimmed != acc.Path {
+				pathCandidates = append(pathCandidates, trimmed)
+			}
+			if !indeterminate {
+				rewritten := pathpolicy.RewriteThroughPending(pathpolicy.Resolve(state.Path, home, acc.Path), links)
+				pathCandidates = append(pathCandidates, pathpolicy.ResolvePhysical(rewritten))
+			}
+
+			if acc.Op == pathpolicy.OpWrite || acc.Op == pathpolicy.OpDelete {
+				if guarded := matchesSelf(self, pathCandidates); guarded != "" {
+					if rank := decisionRank("deny"); rank > best {
+						best = rank
+						decision, source = "deny", "self_protection"
+						reason = fmt.Sprintf("policygate's own executable (%s): %s", acc.Op, acc.Path)
+						matchedBy = guarded
+					}
 				}
 			}
 
@@ -707,7 +793,8 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 					d := cfg.SensitivePaths.Policy.For(string(acc.Op))
 					if rank := decisionRank(d); rank > best {
 						best = rank
-						decision, reason, matchedBy = d, fmt.Sprintf("%s (%s): %s", rule.Reason, acc.Op, acc.Path), rule.Pattern
+						decision, source, matchedBy = d, "path_policy", rule.Pattern
+						reason = fmt.Sprintf("%s (%s): %s", rule.Reason, acc.Op, acc.Path)
 					}
 				}
 			}
@@ -716,7 +803,8 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 				if rule := matchAny(cfg.MatchProtected, pathCandidates); rule != nil {
 					if rank := decisionRank("deny"); rank > best {
 						best = rank
-						decision, reason, matchedBy = "deny", fmt.Sprintf("protected path (%s): %s", acc.Op, acc.Path), rule.Pattern
+						decision, source, matchedBy = "deny", "path_policy", rule.Pattern
+						reason = fmt.Sprintf("protected path (%s): %s", acc.Op, acc.Path)
 					}
 				}
 			}
@@ -742,15 +830,16 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 						reasonSuffix = "working directory could not be resolved, treated as " + reasonSuffix
 					}
 					best = rank
-					decision, reason, matchedBy = d, fmt.Sprintf("%s %s", acc.Op, reasonSuffix), ""
+					decision, source, matchedBy = d, "path_policy", ""
+					reason = fmt.Sprintf("%s %s", acc.Op, reasonSuffix)
 				}
 			}
 		}
 	}
 	if best == 0 {
-		return "", "", ""
+		return "", "", "", ""
 	}
-	return decision, reason, matchedBy
+	return decision, reason, source, matchedBy
 }
 
 func matchAny(match func(string) *rules.Rule, candidates []string) *rules.Rule {
@@ -794,32 +883,98 @@ func loadConfig() (*rules.Config, string, error) {
 	return cfg, "built-in default", nil
 }
 
+// configPath reports the configuration to load, or "" when the embedded
+// defaults apply. paths.ConfigSource documents why an explicitly selected file
+// skips the existence check.
+//
+// A --config on the command line wins over POLICYGATE_CONFIG: it is the more
+// specific of the two, and the only one a host can be made to deliver on every
+// platform.
 func configPath() string {
-	if p := os.Getenv("POLICYGATE_CONFIG"); p != "" {
+	if p := resolveConfigFlag(); p != "" {
 		return p
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	p := filepath.Join(home, ".policygate", "config.yaml")
-	if _, err := os.Stat(p); err != nil {
-		return ""
-	}
+	p, _ := paths.ConfigSource()
 	return p
 }
 
 func auditPath(cfg *rules.Config) string {
 	p := cfg.Audit.Path
 	if p == "" {
-		p = "~/.policygate/log/audit.log"
+		p = paths.DefaultAuditLog
 	}
-	if strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			p = filepath.Join(home, p[2:])
+	return paths.Expand(p)
+}
+
+// resolveDialect reports the shell language a payload carries, honouring an
+// explicit POLICYGATE_SHELL over the host contract.
+//
+// The override exists because the contract is measured behaviour, not a
+// promise: it has to be correctable in the field without waiting for a release.
+func resolveDialect(host, toolName string) dialect.Dialect {
+	if v := os.Getenv(dialect.EnvShell); v != "" {
+		if d, err := dialect.Parse(v); err == nil {
+			return d
+		} else {
+			warnf("%s: %v (falling back to detection)", dialect.EnvShell, err)
 		}
 	}
-	return p
+	return dialect.Detect(host, toolName, runtime.GOOS)
+}
+
+// carriesShellCommand reports whether a tool hands policygate a shell command
+// to evaluate.
+//
+// Claude Code on Windows carries commands through a PowerShell tool as well as
+// a Bash one, and measuring a session found 12 PowerShell calls against 10 Bash
+// ones with none of the PowerShell reaching the audit log: matching only "Bash"
+// left more than half the commands unexamined. Anything else - a file edit, a
+// web fetch - carries no command and is not this hook's business.
+func carriesShellCommand(toolName string) bool {
+	switch strings.ToLower(toolName) {
+	case "bash", "powershell":
+		return true
+	}
+	return false
+}
+
+// warnOnDialectMismatch reports text that reads as PowerShell where the host
+// contract says POSIX.
+//
+// The text is never allowed to decide - it can be shaped at will, and letting
+// it choose would hand an attacker the analysis it prefers to face. But a host
+// that quietly changes what it sends would otherwise leave PowerShell being
+// read as POSIX with nothing to show for it, so the disagreement is surfaced.
+func warnOnDialectMismatch(shell dialect.Dialect, cmd string) {
+	if shell != dialect.POSIX {
+		return
+	}
+	if dialect.LooksLikePowerShell(maskQuotedText(cmd)) {
+		warnf("command reads as PowerShell but the host contract says posix; set %s=powershell if this host has changed", dialect.EnvShell)
+	}
+}
+
+// resolveConfigFlag reads a --config given on the hook command line.
+//
+// It exists because naming the configuration through the environment is not
+// portable. Wrapping the binary in /usr/bin/env, the way a per-host policy used
+// to be documented, cannot work on Windows: there is no such program, Codex
+// spawns the command directly, and the hook never starts. A hook that fails to
+// start does not stop the tool call - that is how hooks are specified - so the
+// command runs against a gate that was never consulted. Measured on Codex CLI
+// 0.147.0 under Windows 11, nothing reached the audit log. A gate that is
+// registered, trusted, and inert is the worst failure this can have, so the
+// configuration has to be nameable without a wrapper.
+func resolveConfigFlag() string {
+	for i, a := range os.Args {
+		if a == "--config" && i+1 < len(os.Args) {
+			return os.Args[i+1]
+		}
+		if v, ok := strings.CutPrefix(a, "--config="); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveHost uses --host before POLICYGATE_HOST and never infers a host from payload data.
@@ -836,10 +991,18 @@ func resolveHost() string {
 }
 
 func finalizeForHost(host string, decision hook.Decision, reason string) (hook.Decision, string) {
-	if decision == hook.DecisionAsk && host != "claude" {
-		return hook.DecisionDeny, reason + " (ask is not enforced under this host; converted to deny — pass --host claude if this hook only runs under Claude Code)"
+	if decision != hook.DecisionAsk || host == "claude" {
+		return decision, reason
 	}
-	return decision, reason
+	// The note differs by whether the host was actually named. A correctly
+	// configured Codex hook converts ask to deny by design, and telling its
+	// user to "pass --host claude" on every such command reads as a
+	// misconfiguration report for a setup that is right. Only a host nobody
+	// declared is worth suggesting a flag for.
+	if host == "" {
+		return hook.DecisionDeny, reason + " (no host was declared, so ask is converted to deny; pass --host claude if this hook only runs under Claude Code)"
+	}
+	return hook.DecisionDeny, reason + " (this host does not support a standalone ask, so it is enforced as deny)"
 }
 
 // resolveCWD falls back to the process working directory when the host omits

@@ -35,6 +35,69 @@ deny:
   - pattern: '(^|[;&|])\s*(/\S*/)?(python3?|perl|ruby|sh|bash|zsh)\b[^;\n]*(\.policygate|\.codex/(config\.toml|hooks\.json)|\.claude/settings(\.local)?\.json)'
     reason: "Interpreter-based modification of policygate or hook configuration"
 
+  # PowerShell. These apply everywhere policygate runs, because the dialect is
+  # not visible from the tool that carried the command: Codex on Windows reports
+  # tool_name "Bash" and sends PowerShell, and Claude Code has a PowerShell tool
+  # of its own. None of these patterns has a meaning under a POSIX shell.
+  #
+  # Matching ignores case throughout, which this section depends on: PowerShell
+  # resolves cmdlet and parameter names without regard to it.
+  #
+  # Deliberately keyed off the target alone, never the switches. PowerShell
+  # accepts any unambiguous prefix of a parameter name, and Remove-Item has no
+  # other parameter starting with R, so -Recurse can be written -r. A rule that
+  # required the switch would be one letter away from useless; a rule that
+  # denies naming a drive root or the user profile at all cannot be shortened
+  # past. Deleting either is never routine, with or without -Recurse.
+  # A drive root has no POSIX reading, so every alias applies here, rm included.
+  - pattern: '(^|[;&|(])\s*(remove-item|ri|rm|rd|rmdir|del|erase)\b[^;&|]*[\s''"]+(\$env:userprofile|[a-z]:)[\\/]?([''"]|\s|$)'
+    reason: "PowerShell delete targeting a drive root or the user profile"
+  # ~ and $HOME are shared syntax, and `rm` reaching them is already handled
+  # structurally by the critical-delete check, which reports a better reason.
+  # Leaving rm out here keeps that check in charge of the POSIX spelling.
+  - pattern: '(^|[;&|(])\s*(remove-item|ri|rd|rmdir|del|erase)\b[^;&|]*[\s''"]+(\$home|~)[\\/]?([''"]|\s|$)'
+    reason: "PowerShell delete targeting the user profile"
+  - pattern: '(^|[;&|(])\s*(rd|rmdir|del|erase)\b[^;&|]*\s/s\b[^;&|]*[\s''"]+[a-z]:[\\/]?([''"]|\s|$)'
+    reason: "cmd.exe recursive delete of a drive root"
+  - pattern: '(^|[;&|(])\s*(format-volume|clear-disk|initialize-disk|diskpart)\b'
+    reason: "Disk format or repartition"
+  - pattern: '(^|[;&|(])\s*(stop-computer|restart-computer)\b'
+    reason: "Host power state change"
+  # The PowerShell spelling of piping a download straight into a shell.
+  - pattern: '(^|[;&|(])\s*(invoke-webrequest|invoke-restmethod|iwr|irm|curl|wget)\b[^;]*\|\s*(invoke-expression|iex)\b'
+    reason: "Piping a network download directly into PowerShell"
+  - pattern: '(^|[;&|(])\s*(vssadmin|wbadmin)\b[^;&|]*\bdelete\b'
+    reason: "Deleting shadow copies or backup catalogs"
+  - pattern: '(^|[;&|(])\s*bcdedit\b'
+    reason: "Boot configuration change"
+  # Enum values accept an unambiguous prefix too: Bypass is the only policy
+  # starting with B, and Unrestricted the only one starting with Unr.
+  - pattern: '(^|[;&|(])\s*set-executionpolicy\b[^;&|]*\s(byp\w*|b|unr\w*)\b'
+    reason: "Disabling the PowerShell execution policy"
+  # Matched on the cmdlet, not on which setting it changes. Set-MpPreference
+  # takes over a hundred parameters, roughly sixty of them Disable*, and any of
+  # them can be abbreviated to its shortest unambiguous prefix: -ExclusionPa
+  # reaches ExclusionPath, and ExclusionProcess and HighThreatDefaultAction
+  # weaken protection just as effectively. Enumerating the dangerous ones is a
+  # race that cannot be won, and reconfiguring Defender is not something a
+  # coding assistant has any business doing.
+  - pattern: '(^|[;&|(])\s*(set|add|remove)-mppreference\b'
+    reason: "Reconfiguring Microsoft Defender"
+  - pattern: '(^|[;&|(])\s*reg(\.exe)?\s+delete\b[^;&|]*\bhk(lm|cu|cr|u|cc)\b[^;&|]*\s/f\b'
+    reason: "Forced registry deletion"
+  - pattern: '(^|[;&|(])\s*(remove-item|ri)\b[^;&|]*\bhk(lm|cu|cr|u|cc):[\\/]?([''"]|\s|$)'
+    reason: "Deleting a registry hive root"
+  - pattern: '(^|[;&|(])\s*takeown\b[^;&|]*\s/f\s+[a-z]:[\\/]?\s+[^;&|]*/r\b'
+    reason: "Recursive ownership seizure of a drive root"
+  - pattern: '(^|[;&|(])\s*icacls\b[^;&|]*\s(everyone|users|todos|jeder):[a-z()]*f\b[^;&|]*\s/t\b'
+    reason: "Granting full control recursively"
+  # An encoded command cannot be analyzed at all, so it is never allowed to
+  # stand in for one that could be.
+  - pattern: '(^|[;&|(])\s*(powershell(\.exe)?|pwsh(\.exe)?)\b[^;&|]*\s-(e|ec|enc|encoded\w*)\b'
+    reason: "Base64-encoded PowerShell command, which cannot be analyzed"
+  - pattern: '(^|[;&|(])\s*(powershell(\.exe)?|pwsh(\.exe)?|cmd(\.exe)?)\b[^;\n]*(\.policygate|\.codex[\\/](config\.toml|hooks\.json)|\.claude[\\/]settings(\.local)?\.json)'
+    reason: "Interpreter-based modification of policygate or hook configuration"
+
 # Ask rules request explicit host approval for specific commands without
 # denying them outright. They are checked the same way deny rules are:
 # against the whole command and again against each subcommand's resolved
@@ -94,8 +157,11 @@ sensitive_paths:
     write: "deny"
     delete: "deny"
 
-# Always deny writes and deletions to matched paths. This is a soft guard;
-# place the binary and hook configuration in OS-protected locations as well.
+# Always deny writes and deletions to matched paths. This is a soft guard: it
+# depends on policygate being invoked at all, so pair it with the host's own
+# permission model rather than treating it as a boundary. The binary itself is
+# guarded structurally, whatever path it is installed to, and needs no entry
+# here; run `policygate doctor` to see the paths that covers.
 protected_paths:
   enabled: true
   patterns:
@@ -107,12 +173,27 @@ protected_paths:
       reason: "Claude Code hook registration"
 
 # No AI or LLM fallback is used for unmatched commands.
+#
+# unanalyzed_action replaces action when the command's dialect has no structural
+# analysis behind it, which today means PowerShell. The distinction matters
+# because the two look the same and mean opposite things: a POSIX command that
+# reaches the fallback was parsed and had its paths classified, so nothing
+# applied; a PowerShell command that reaches it was never understood, and only
+# the text rules had a chance. `ask` therefore asks about the commands
+# policygate cannot vouch for, rather than passing them off as examined.
+#
+# Codex on Windows sends PowerShell for every command and converts ask to deny,
+# so leaving this at ask there rejects ordinary work. Give Codex its own file
+# with `policygate install-hook --host codex --config <path>` and set
+# unanalyzed_action: defer in it, after reading the limitations.
 unknown:
   action: defer # defer | ask | deny
+  unanalyzed_action: ask # defer | ask | deny
 
 # Action used when shell syntax cannot be parsed.
 parse_error:
   action: defer # defer | ask | deny
+  unanalyzed_action: ask # defer | ask | deny
 
 audit:
   enabled: true

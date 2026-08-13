@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
 
@@ -130,6 +131,10 @@ func Classify(cmd shellparse.Command) []Access {
 		switch {
 		case r.Target == "":
 			continue
+		case duplicatesDescriptor(r.Op, r.Target):
+			// 2>&1 names a file descriptor, not a file. Reading it as one
+			// reports a write to a file called "1", which every `go build
+			// ./... 2>&1` then has to be approved for.
 		case r.Op == "<":
 			out = append(out, newAccess(r.Target, OpRead))
 		case r.Op == "<<" || r.Op == "<<-" || r.Op == "<<<":
@@ -139,7 +144,58 @@ func Classify(cmd shellparse.Command) []Access {
 		}
 	}
 
-	return out
+	return withoutPseudoDevices(out)
+}
+
+// duplicatesDescriptor reports whether a redirection copies a file descriptor
+// rather than opening a file.
+//
+// Only a numeric operand, or the `-` that closes a descriptor, is a duplication:
+// bash reads `ls >&out.log` as a redirection to the file out.log, so the
+// operand has to be inspected rather than the operator alone.
+func duplicatesDescriptor(op, target string) bool {
+	if op != ">&" && op != "<&" {
+		return false
+	}
+	if target == "-" {
+		return true
+	}
+	for _, r := range target {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return target != ""
+}
+
+// harmlessDevices are the pseudo-devices that discard, generate, or name an
+// already-open stream. Opening one touches no file, so a policy question about
+// where it sits does not arise.
+//
+// Real devices are deliberately absent: /dev/sda and its kin are covered by
+// deny rules matched against the command text, and exempting all of /dev would
+// take those out along with the harmless ones.
+var harmlessDevices = map[string]bool{
+	"/dev/null": true, "/dev/zero": true, "/dev/full": true,
+	"/dev/random": true, "/dev/urandom": true,
+	"/dev/stdin": true, "/dev/stdout": true, "/dev/stderr": true,
+	"/dev/tty": true,
+}
+
+// withoutPseudoDevices drops accesses to those devices.
+//
+// Without this, `2>/dev/null` reads as a write outside the project and asks for
+// approval - on a command as ordinary as `ls foo 2>/dev/null`. A gate that
+// interrupts that often is one people turn off.
+func withoutPseudoDevices(accesses []Access) []Access {
+	kept := accesses[:0]
+	for _, access := range accesses {
+		if harmlessDevices[access.Path] || strings.HasPrefix(access.Path, "/dev/fd/") {
+			continue
+		}
+		kept = append(kept, access)
+	}
+	return kept
 }
 
 // classifyCopyLike classifies sources and destinations for copy-like commands.
@@ -591,22 +647,58 @@ func makePendingSymlink(cur CWDState, home, source, linkPath string, pending []S
 // working directory); both are normalized to forward slashes before path,
 // which is always POSIX-style shell text, is resolved against them.
 func Resolve(cwd, home, path string) string {
+	return resolve(cwd, home, path, paths.FSDropsNameDecorations)
+}
+
+// resolve is Resolve with the host's name handling stated as an argument
+// instead of read from the platform, so both branches can be exercised from
+// any platform. A test that consulted runtime.GOOS would prove nothing on the
+// Mac and Linux runners this package is developed and merged on, which is
+// where a Windows-only path rule is most likely to rot unnoticed.
+//
+// dropNameDecorations belongs here rather than in the classifiers because the
+// spelling that reaches the path rules is decided here: this is the last point
+// at which `.env.` is still distinguishable from the `.env` Win32 will open.
+func resolve(cwd, home, path string, dropNameDecorations bool) string {
 	if path == "" {
 		return path
 	}
 	cwd = filepath.ToSlash(cwd)
 	home = filepath.ToSlash(home)
-	if (path == "~" || strings.HasPrefix(path, "~/")) && home != "" {
+	var resolved string
+	switch {
+	case (path == "~" || strings.HasPrefix(path, "~/")) && home != "":
 		// home is already a resolved, absolute location (posix or a native
 		// Windows path with a drive letter); posixpath.IsAbs cannot tell a
-		// drive-lettered path is absolute, so return directly instead of
+		// drive-lettered path is absolute, so join directly instead of
 		// re-running it through the absoluteness check below.
-		return posixpath.Clean(posixpath.Join(home, strings.TrimPrefix(path, "~")))
+		resolved = posixpath.Clean(posixpath.Join(home, strings.TrimPrefix(path, "~")))
+	case !isAbsPath(path):
+		resolved = posixpath.Clean(posixpath.Join(cwd, path))
+	default:
+		resolved = posixpath.Clean(path)
 	}
-	if !isAbsPath(path) {
-		path = posixpath.Join(cwd, path)
+	if dropNameDecorations {
+		resolved = trimWindowsNameDecorations(resolved)
 	}
-	return posixpath.Clean(path)
+	return resolved
+}
+
+// TrimHostNameDecorations removes what this host's filesystem ignores in a
+// name, and returns p untouched where those characters are significant.
+//
+// Resolve covers the paths it can place, but a path holding an unexpanded
+// variable is never resolved - it is matched as written - and `$D/.env.` would
+// otherwise reach the rules still wearing the dot that hides it.
+func TrimHostNameDecorations(p string) string {
+	return trimHostNameDecorations(p, paths.FSDropsNameDecorations)
+}
+
+func trimHostNameDecorations(p string, dropNameDecorations bool) string {
+	if !dropNameDecorations || p == "" {
+		return p
+	}
+	return trimWindowsNameDecorations(p)
 }
 
 // isAbsPath reports whether p is already an absolute location. p is
@@ -657,13 +749,37 @@ func ResolvePhysical(path string) string {
 // IsOutside reports whether resolvedPath is outside resolvedRoot. Both
 // arguments are expected to already be clean, forward-slash paths, as
 // returned by ResolvePhysical.
+//
+// The comparison ignores case only where the filesystem holding the root does:
+// on Windows a hook reporting C:/Project and a command naming c:/project/src
+// refer to the same tree, while on a case-sensitive volume they are two
+// directories and folding them together would put one inside the other. See
+// casefold.go for why this is answered by probing rather than by the OS.
 func IsOutside(resolvedRoot, resolvedPath string) bool {
 	if resolvedRoot == "" {
 		return true
 	}
+	ignoreCase := rootIgnoresCase(resolvedRoot)
 	root := strings.TrimSuffix(resolvedRoot, "/")
-	if resolvedPath == root || resolvedPath == resolvedRoot {
+	if samePath(resolvedPath, root, ignoreCase) || samePath(resolvedPath, resolvedRoot, ignoreCase) {
 		return false
 	}
-	return !strings.HasPrefix(resolvedPath, root+"/")
+	return !hasPathPrefix(resolvedPath, root+"/", ignoreCase)
+}
+
+func samePath(a, b string, ignoreCase bool) bool {
+	if ignoreCase {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// hasPathPrefix compares byte-for-byte lengths even when folding case. Simple
+// case folding can change a string's encoded length for a few exotic runes, so
+// such a path is reported as outside the root: the conservative answer.
+func hasPathPrefix(s, prefix string, ignoreCase bool) bool {
+	if !ignoreCase {
+		return strings.HasPrefix(s, prefix)
+	}
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }

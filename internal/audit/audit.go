@@ -21,6 +21,12 @@ type Record struct {
 	Decision  string    `json:"decision"`
 	Reason    string    `json:"reason,omitempty"`
 	MatchedBy string    `json:"matched_by,omitempty"`
+
+	// Dialect is the shell language the command was read as. It records which
+	// analysis ran, so a decision reached without one - PowerShell has no
+	// structural analysis - is not mistaken later for a command that was
+	// examined and found ordinary.
+	Dialect string `json:"dialect,omitempty"`
 }
 
 // Options controls audit-log rotation.

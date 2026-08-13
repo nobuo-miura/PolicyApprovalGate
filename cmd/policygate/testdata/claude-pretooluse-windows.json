@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture-claude",
+  "transcript_path": "C:\\workspace\\transcript.jsonl",
+  "cwd": "C:\\workspace\\project",
+  "prompt_id": "fixture-prompt",
+  "permission_mode": "auto",
+  "effort": {"level": "high"},
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "rm -rf /", "description": "fixture"},
+  "tool_use_id": "tool-fixture"
+}

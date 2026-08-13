@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/nobuo-miura/policyapprovalgate/internal/dialect"
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
 	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
 )
@@ -21,6 +22,9 @@ type evaluationOutput struct {
 	Reason    string        `json:"reason"`
 	Source    string        `json:"source"`
 	MatchedBy string        `json:"matched_by,omitempty"`
+	// Dialect names the analysis that ran, so a result can be read knowing
+	// whether the command was structurally examined or only matched as text.
+	Dialect string `json:"dialect,omitempty"`
 }
 
 func runEvaluate(args []string) int {
@@ -29,6 +33,7 @@ func runEvaluate(args []string) int {
 	command := fs.String("command", "", "shell command to evaluate")
 	cwd := fs.String("cwd", "", "working directory used for path checks")
 	host := fs.String("host", "codex", "host behavior to apply (codex or claude)")
+	tool := fs.String("tool", "Bash", "tool name the host would report, which affects dialect detection")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -49,10 +54,13 @@ func runEvaluate(args []string) int {
 		fmt.Fprintf(os.Stderr, "policygate evaluate: %v\n", err)
 		return 1
 	}
-	in := hook.Input{ToolName: "Bash", CWD: *cwd, ToolInput: hook.ToolInput{Command: *command}}
-	decision, reason, source, matchedBy := evaluate(cfg, in, *command)
+	in := hook.Input{ToolName: *tool, CWD: *cwd, ToolInput: hook.ToolInput{Command: *command}}
+	shell := resolveDialect(*host, *tool)
+	warnOnDialectMismatch(shell, *command)
+	decision, reason, source, matchedBy := evaluate(cfg, in, *command, shell)
 	decision, reason = finalizeForHost(*host, decision, reason)
-	if err := json.NewEncoder(os.Stdout).Encode(evaluationOutput{decision, reason, source, matchedBy}); err != nil {
+	out := evaluationOutput{decision, reason, source, matchedBy, string(shell)}
+	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		fmt.Fprintf(os.Stderr, "policygate evaluate: encode result: %v\n", err)
 		return 1
 	}
@@ -81,6 +89,12 @@ func runCheckConfig(args []string) int {
 	if warning := fallbackAskWarning(cfg); warning != "" {
 		fmt.Printf("warning: %s\n", warning)
 	}
+	if warning := unanalyzedAskWarning(cfg); warning != "" {
+		fmt.Printf("warning: %s\n", warning)
+	}
+	if warning := staleRulesWarning(cfg); warning != "" {
+		fmt.Printf("warning: %s\n", warning)
+	}
 	fmt.Printf("ok: %s (schema v%d, mode %s)\n", *path, cfg.Version, cfg.Mode)
 	return 0
 }
@@ -107,6 +121,49 @@ func fallbackAskWarning(cfg *rules.Config) string {
 		strings.Join(sections, " and "))
 }
 
+// staleRulesWarning reports built-in rules the configuration no longer carries.
+//
+// A user configuration replaces a rule list wholesale, so one written before a
+// release never receives the rules that release added. Nothing else says so:
+// the gate loads, reports no error, and enforces less than the documentation
+// describes. Silence there is the failure this whole project exists to avoid.
+func staleRulesWarning(cfg *rules.Config) string {
+	missing, err := cfg.MissingDefaultRules()
+	if err != nil || len(missing) == 0 {
+		return ""
+	}
+	sections := make([]string, 0, len(missing))
+	for _, name := range []string{"deny", "sensitive_paths.patterns", "protected_paths.patterns"} {
+		if count, ok := missing[name]; ok {
+			sections = append(sections, fmt.Sprintf("%s (%d)", name, count))
+		}
+	}
+	return fmt.Sprintf("this configuration is missing built-in rules added since it was written: %s; run `policygate init --upgrade` to merge them, then review the warnings it prints",
+		strings.Join(sections, ", "))
+}
+
+// unanalyzedAskWarning reports the shipped default, which is safe on Claude
+// Code and unusable on Codex under Windows.
+//
+// Both are legitimate settings, so this describes the consequence rather than
+// prescribing a value. It stays host-neutral for the same reason
+// fallbackAskWarning does: neither check-config nor doctor accepts --host, so
+// neither can tell which host the registered hook runs under.
+func unanalyzedAskWarning(cfg *rules.Config) string {
+	var sections []string
+	if cfg.Unknown.UnanalyzedAction == "ask" {
+		sections = append(sections, "unknown.unanalyzed_action")
+	}
+	if cfg.ParseError.UnanalyzedAction == "ask" {
+		sections = append(sections, "parse_error.unanalyzed_action")
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s: Codex sends PowerShell for every command on Windows and converts ask to deny, which would reject ordinary work there; register Codex with `policygate install-hook --host codex --config <path>` and set unanalyzed_action: defer in that file, accepting that a PowerShell command whose paths cannot be resolved is then deferred rather than asked about",
+		strings.Join(sections, " and "))
+}
+
 func runDoctor(args []string) int {
 	if len(args) != 0 {
 		fmt.Fprintln(os.Stderr, "usage: policygate doctor")
@@ -128,15 +185,66 @@ func runDoctor(args []string) int {
 		if warning := fallbackAskWarning(cfg); warning != "" {
 			fmt.Printf("config warning: %s\n", warning)
 		}
+		if warning := unanalyzedAskWarning(cfg); warning != "" {
+			fmt.Printf("config warning: %s\n", warning)
+		}
+		if warning := staleRulesWarning(cfg); warning != "" {
+			fmt.Printf("config warning: %s\n", warning)
+		}
 	}
 	if exe, err := os.Executable(); err == nil {
 		fmt.Printf("binary: %s\n", exe)
 	}
-	fmt.Printf("host: %s\n", resolveHost())
+	// Self-protection depends on resolving this process's own path, so report
+	// what it actually guards rather than leaving it to be assumed.
+	if guarded := selfPaths(); len(guarded) == 0 {
+		fmt.Println("self-protection: inactive (own path could not be resolved)")
+	} else {
+		fmt.Printf("self-protection: %s\n", strings.Join(guarded, ", "))
+	}
+	reportHookRegistrations()
+	host := resolveHost()
+	fmt.Printf("host: %s\n", host)
+	// The dialect follows from the host and the platform, so a misconfigured
+	// --host silently changes which analysis runs. Show the result.
+	shell := resolveDialect(host, "Bash")
+	fmt.Printf("shell dialect: %s (structural analysis: %t)\n", shell, shell.Analyzable())
+	if shell != dialect.POSIX {
+		fmt.Println("shell warning: this host sends a dialect policygate does not fully parse; rules apply to the command text and to the paths recoverable from it, but a command whose paths cannot be resolved falls to unanalyzed_action")
+	}
 	if failures != 0 {
 		return 1
 	}
 	return 0
+}
+
+// reportHookRegistrations shows which matchers each Claude Code settings file
+// registers policygate under.
+//
+// Upgrading the rules and upgrading the registration are separate steps, and
+// only the first announces itself. A settings file written before the
+// PowerShell matcher existed keeps working, reports nothing, and lets every
+// PowerShell command past - which is how a machine with current rules was found
+// listing ~/.ssh without a prompt.
+func reportHookRegistrations() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	for _, reg := range claudeRegistrations(hookProgramNames(exe)) {
+		switch {
+		case !reg.exists:
+			continue
+		case len(reg.matchers) == 0:
+			fmt.Printf("hook: %s: present, no policygate registration\n", reg.path)
+		default:
+			fmt.Printf("hook: %s: registered for %s\n", reg.path, strings.Join(reg.matchers, ", "))
+			if absent := reg.missing(); len(absent) > 0 {
+				fmt.Printf("hook warning: %s: not registered for %s, so those tools are never examined; re-run `policygate install-hook --host claude`\n",
+					reg.path, strings.Join(absent, ", "))
+			}
+		}
+	}
 }
 
 func writeConfigAtomically(path string, data []byte) error {

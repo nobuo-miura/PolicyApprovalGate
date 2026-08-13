@@ -1,0 +1,12 @@
+# Check every text file out with LF, whatever core.autocrlf says.
+#
+# Git for Windows enables autocrlf by default, which rewrites the working tree
+# to CRLF on checkout. gofmt then reports every Go file as unformatted and
+# golangci-lint fails before it has looked at any code, on a tree that differs
+# from HEAD by nothing but line endings. Pinning the checkout here keeps a
+# Windows contributor from having to discover that.
+* text=auto eol=lf
+
+# Fixtures are compared byte for byte against golden output.
+*.json -text
+*.golden -text
