@@ -9,6 +9,10 @@ Claude Code / Codex CLI がBashコマンドを実行する前に、ルールベ�
 
 既定ルールは明確に危険な操作の見落としを減らすためのもので、あらゆるリスクを厳格に遮断することは目指していません。判定できない操作は、既定ではホスト側の通常の承認フローへ委ねます。
 
+![Claude Code が ~/.ssh の読み取りを遮断される様子](images/ss.gif)
+
+Claude Codeが`~/.ssh`を読もうとして遮断された場面。判定理由がそのままホストに表示されます。
+
 ## 特長
 
 - AI/LLMを使わない、決定論的なルール判定
@@ -54,7 +58,7 @@ fixture/goldenテストの互換性基準（2026-08-11時点）：
 
 実ホストの仕様変更に備え、入力fixtureと返却JSONのgoldenテストをCIで実行します。
 
-現時点の実行サポート対象はmacOSとLinuxです。WindowsはCIでビルドと単体テストを行い、PowerShellの方言判定とdenyルールを備えていますが、PowerShellコマンドからのパス抽出が未実装のため実験的サポートです。詳細は「PowerShellの扱い」を参照してください。
+現時点の実行サポート対象はmacOSとLinuxです。WindowsはCIでビルドと単体テストを行い、PowerShellの方言判定・denyルール・パス抽出を備えていますが、シェル構文を完全には解析しないため実験的サポートです。何が適用され何が適用されないかは「PowerShellの扱い」を参照してください。
 
 ## クイックスタート
 
@@ -103,6 +107,7 @@ policygate install-hook --host codex    # ~/.codex/config.toml
 | --- | --- |
 | `--user` | Claude Codeの登録先を `~/.claude/settings.json` にする（既定はプロジェクトの `.claude/settings.json`） |
 | `--path PATH` | 登録先ファイルを明示指定する |
+| `--config PATH` | 登録するコマンドに `--config PATH` を含める（ホストごとに設定を分ける場合） |
 | `--dry-run` | 書き込まず、書き込む内容を表示する |
 
 登録は冪等で、既存の設定は保持されます。書き込み前にバックアップを作成し、置き換えはアトミックに行います。解除は `uninstall-hook` です。
@@ -124,6 +129,25 @@ Codex hooksは既定で有効です。`codex_hooks` は非推奨の別名で、�
 **Windowsではパス区切りにフォワードスラッシュを使ってください**（`D:/bin/policygate.exe`）。バックスラッシュは、JSON文字列では `\b` がバックスペースとして解釈され、ホストがコマンドをシェルに渡す場合はエスケープ文字として除去されるため、どちらの経路でも壊れます。Windowsはパス区切りとしてフォワードスラッシュを受け付けます。
 
 `install-hook` を使えば、パスの解決も区切り文字の変換も自動的に行われるため、これらの問題は起こりません。
+
+### 既存の設定を更新する
+
+**アップグレード時は2つとも実行してください。片方だけでは保護に穴が残ります。**
+
+```bash
+policygate init --upgrade                      # ルールを更新
+policygate install-hook --host claude --user   # フック登録を更新
+policygate doctor                              # 両方の状態を確認
+```
+
+設定ファイルもフック登録も自動更新されません。しかも**足りない側は黙っている**ため、片方だけ実行すると気づけません。
+
+| 更新しないと | 何が起きるか |
+| --- | --- |
+| ルール（`init --upgrade`） | 新しいdenyルールが適用されない。ユーザー設定はリストを丸ごと置き換えるため |
+| フック登録（`install-hook`） | 新しく対象になったツール（Claude Code on Windowsの`PowerShell`ツールなど）が**policygateに届かない** |
+
+実際に、ルールは最新なのにフック登録が古いWindows環境で、`~/.ssh`の一覧が素通りする事例が発生しています。`policygate doctor`はどちらの不足も検出して警告します。
 
 ## ホストごとの判定
 
@@ -171,21 +195,27 @@ Claude Codeではこれらのフォールバック時に確認を求めます。
 
 ### ホストごとに設定ファイルを分ける
 
-設定にホスト別の項目はありません。両方のホストを併用していて、Claude Codeでは`ask`、Codexでは`defer`のように挙動を変えたい場合は、フック登録ごとに`POLICYGATE_CONFIG`で別の設定ファイルを指定してください。設定はフック実行のたびに読み込まれるため、ホストごとに独立したポリシーを持てます。
+設定にホスト別の項目はありません。両方のホストを併用していて、Claude Codeでは`ask`、Codexでは`defer`のように挙動を変えたい場合は、フック登録ごとに`--config`で別の設定ファイルを指定してください。設定はフック実行のたびに読み込まれるため、ホストごとに独立したポリシーを持てます。
 
-Claude Code (`settings.json`):
+`install-hook`が最終形を書き出します。
 
-```json
-"command": "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/claude.yaml /usr/local/bin/policygate --host claude"
+```bash
+policygate install-hook --host claude --config /absolute/home/path/.policygate/claude.yaml
+policygate install-hook --host codex  --config /absolute/home/path/.policygate/codex.yaml
 ```
 
-Codex (`~/.codex/config.toml`):
+登録されるコマンドは次の形です。
 
-```toml
-command = "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/codex.yaml /usr/local/bin/policygate --host codex"
+```
+/absolute/path/policygate --host codex --config /absolute/home/path/.policygate/codex.yaml
 ```
 
-両方のファイルはユーザーの`.policygate`ディレクトリ配下へ置き、`protected_paths`を有効にしたまま、生成された`.policygate`の項目を残してください。これにより、その配下への書き込みと削除を拒否します。上記のパスはプレースホルダーなので、`~/.policygate/claude.yaml`と`~/.policygate/codex.yaml`の絶対パスへ置き換えてください。`~`や`$HOME`はホストがコマンドをシェル経由で起動する場合しか展開されず、展開されなければ設定ファイルを読めません。別の場所へ置く必要がある場合は、フック登録前にそのパスを`protected_paths.patterns`へ追加してください。
+> [!IMPORTANT]
+> **`/usr/bin/env POLICYGATE_CONFIG=... policygate` の形は使わないでください。** Windowsに`/usr/bin/env`は存在せず、Codexはコマンドを直接起動するため**フックの起動自体が失敗します。しかもCodexはその失敗を報告せずコマンドを実行します**（Windows 11で実測）。登録済み・トラスト済みに見えて、ゲートが完全に無効という状態になります。`--config`にはこの問題がありません。
+
+`POLICYGATE_CONFIG`環境変数も引き続き使えますが、`--config`が優先されます。環境変数はプロセス全体に効くため、片方のホストだけに適用したい場合には向きません。
+
+両方のファイルはユーザーの`.policygate`ディレクトリ配下へ置き、`protected_paths`を有効にしたまま、生成された`.policygate`の項目を残してください。これにより、その配下への書き込みと削除を拒否します。**`--config`には絶対パスを渡してください。** `~`や`$HOME`はホストがコマンドをシェル経由で起動する場合しか展開されず、展開されなければ設定ファイルを読めません。別の場所へ置く必要がある場合は、フック登録前にそのパスを`protected_paths.patterns`へ追加してください。
 
 ポリシーが2ファイルに分かれるため、denyルールなど共通部分の更新漏れに注意してください。また、指定したパスが読めない場合、`enforce`モードはそのBash呼び出しをdenyします。登録前に`policygate check-config --config <path>`で各ファイルを検証してください。
 

@@ -58,10 +58,12 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `policygate applies a deterministic policy to PreToolUse hook calls.
 
 Usage:
-  policygate [--host claude|codex]           Evaluate one PreToolUse payload from stdin
-  policygate observe [--host claude|codex]   Record a decision without enforcing it
+  policygate [--host claude|codex] [--config PATH]
+                                             Evaluate one PreToolUse payload from stdin
+  policygate observe [--host claude|codex] [--config PATH]
+                                             Record a decision without enforcing it
   policygate init [--upgrade]                Create or upgrade the user configuration
-  policygate install-hook --host claude|codex [--user] [--path PATH] [--dry-run]
+  policygate install-hook --host claude|codex [--user] [--path PATH] [--config PATH] [--dry-run]
                                              Register this binary as a PreToolUse hook
   policygate uninstall-hook --host claude|codex [--user] [--path PATH] [--dry-run]
                                              Remove the registration
@@ -73,7 +75,8 @@ Usage:
   policygate help                            Print this message
 
 Environment:
-  POLICYGATE_CONFIG  Configuration file path (default ~/.policygate/config.yaml)
+  POLICYGATE_CONFIG  Configuration file path (default ~/.policygate/config.yaml).
+                     A --config flag takes precedence.
   POLICYGATE_HOST    Host behavior applied when --host is omitted
   POLICYGATE_SHELL   Shell dialect (posix or powershell); overrides detection
 `)
@@ -96,12 +99,12 @@ func checkHookArgs(args []string) error {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case arg == "--host":
+		case arg == "--host", arg == "--config":
 			if i+1 >= len(args) {
-				return fmt.Errorf("--host requires a value")
+				return fmt.Errorf("%s requires a value", arg)
 			}
 			i++
-		case strings.HasPrefix(arg, "--host="):
+		case strings.HasPrefix(arg, "--host="), strings.HasPrefix(arg, "--config="):
 		default:
 			return fmt.Errorf("unknown argument %q", arg)
 		}
@@ -883,7 +886,14 @@ func loadConfig() (*rules.Config, string, error) {
 // configPath reports the configuration to load, or "" when the embedded
 // defaults apply. paths.ConfigSource documents why an explicitly selected file
 // skips the existence check.
+//
+// A --config on the command line wins over POLICYGATE_CONFIG: it is the more
+// specific of the two, and the only one a host can be made to deliver on every
+// platform.
 func configPath() string {
+	if p := resolveConfigFlag(); p != "" {
+		return p
+	}
 	p, _ := paths.ConfigSource()
 	return p
 }
@@ -944,6 +954,27 @@ func warnOnDialectMismatch(shell dialect.Dialect, cmd string) {
 	}
 }
 
+// resolveConfigFlag reads a --config given on the hook command line.
+//
+// It exists because naming the configuration through the environment is not
+// portable. The documented way to give each host its own policy wraps the
+// binary in /usr/bin/env, and Windows has no such program: Codex spawns the
+// command directly, fails to start it, and - measured on Windows 11 - runs the
+// command anyway without a word. A gate that is registered, trusted, and
+// completely inert is the worst failure this can have, so the configuration has
+// to be nameable without a wrapper.
+func resolveConfigFlag() string {
+	for i, a := range os.Args {
+		if a == "--config" && i+1 < len(os.Args) {
+			return os.Args[i+1]
+		}
+		if v, ok := strings.CutPrefix(a, "--config="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // resolveHost uses --host before POLICYGATE_HOST and never infers a host from payload data.
 func resolveHost() string {
 	for i, a := range os.Args {
@@ -958,10 +989,18 @@ func resolveHost() string {
 }
 
 func finalizeForHost(host string, decision hook.Decision, reason string) (hook.Decision, string) {
-	if decision == hook.DecisionAsk && host != "claude" {
-		return hook.DecisionDeny, reason + " (ask is not enforced under this host; converted to deny — pass --host claude if this hook only runs under Claude Code)"
+	if decision != hook.DecisionAsk || host == "claude" {
+		return decision, reason
 	}
-	return decision, reason
+	// The note differs by whether the host was actually named. A correctly
+	// configured Codex hook converts ask to deny by design, and telling its
+	// user to "pass --host claude" on every such command reads as a
+	// misconfiguration report for a setup that is right. Only a host nobody
+	// declared is worth suggesting a flag for.
+	if host == "" {
+		return hook.DecisionDeny, reason + " (no host was declared, so ask is converted to deny; pass --host claude if this hook only runs under Claude Code)"
+	}
+	return hook.DecisionDeny, reason + " (this host does not support a standalone ask, so it is enforced as deny)"
 }
 
 // resolveCWD falls back to the process working directory when the host omits

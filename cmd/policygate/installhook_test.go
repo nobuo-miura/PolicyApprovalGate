@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -264,7 +266,7 @@ func TestTomlStringEscapes(t *testing.T) {
 // Reported from a real Windows registration, where only the forward-slash form
 // worked.
 func TestHookCommandWritesForwardSlashes(t *testing.T) {
-	got := hookCommand(`D:\bin\policygate.exe`, "claude")
+	got := hookCommand(`D:\bin\policygate.exe`, "claude", "")
 	if strings.Contains(got, `\`) {
 		t.Errorf("hookCommand() = %q, want no backslash", got)
 	}
@@ -273,11 +275,38 @@ func TestHookCommandWritesForwardSlashes(t *testing.T) {
 	}
 }
 
+// Naming the policy file through the environment needs /usr/bin/env, which
+// Windows does not have: Codex fails to start the command and - measured on
+// Windows 11 - runs the guarded command anyway, with no sign the gate never
+// ran. --config removes the wrapper, so the registration works everywhere.
+func TestHookCommandCarriesAConfigPath(t *testing.T) {
+	got := hookCommand(`D:\bin\policygate.exe`, "codex", `C:\Users\x\.policygate\codex.yaml`)
+	want := "D:/bin/policygate.exe --host codex --config C:/Users/x/.policygate/codex.yaml"
+	if got != want {
+		t.Errorf("hookCommand() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "/usr/bin/env") {
+		t.Errorf("hookCommand() = %q, want no wrapper", got)
+	}
+
+	// A registration naming a policy file must still be recognized, or a second
+	// install appends a duplicate.
+	if !namesPolicygate(got, hookProgramNames(`D:\bin\policygate.exe`)) {
+		t.Errorf("namesPolicygate(%q) = false, want true", got)
+	}
+
+	// A path with a space is quoted, and the flag survives the quoting.
+	spaced := hookCommand("/usr/local/bin/policygate", "claude", "/Users/a b/policy.yaml")
+	if !strings.Contains(spaced, "--config '/Users/a b/policy.yaml'") {
+		t.Errorf("hookCommand() = %q, want the policy path quoted", spaced)
+	}
+}
+
 // The forward-slash form has to round-trip: a registration this command wrote
 // must still be recognized, or install stops being idempotent on Windows.
 func TestWindowsRegistrationRoundTrips(t *testing.T) {
 	const exe = `D:\bin\policygate.exe`
-	command := hookCommand(exe, "claude")
+	command := hookCommand(exe, "claude", "")
 	names := hookProgramNames(exe)
 
 	if !namesPolicygate(command, names) {
@@ -299,7 +328,7 @@ func TestWindowsRegistrationRoundTrips(t *testing.T) {
 		t.Errorf("a second install on Windows changed the file:\n%s\n---\n%s", once, twice)
 	}
 
-	toml, err := rewriteCodexConfig(nil, hookCommand(exe, "codex"), true)
+	toml, err := rewriteCodexConfig(nil, hookCommand(exe, "codex", ""), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,5 +352,64 @@ func TestHookPathSeparatorsLeavesUnixPathsAlone(t *testing.T) {
 		if got := hookPathSeparators(tc.in); got != tc.want {
 			t.Errorf("hookPathSeparators(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// Rules and registration are upgraded by separate commands, and only the rules
+// announce themselves. A settings file written before the PowerShell matcher
+// existed keeps working and reports nothing while every PowerShell command goes
+// past unexamined - found on a machine whose rules were already current, which
+// listed ~/.ssh without a prompt.
+func TestInspectClaudeRegistrationFindsAStaleMatcherSet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	// What install-hook wrote before PowerShell was added.
+	const stale = `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/bin/policygate --host claude"}]}]}}`
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := inspectClaudeRegistration(path, testProgramNames)
+	if !reg.exists {
+		t.Fatal("the settings file was not read")
+	}
+	if len(reg.matchers) != 1 || reg.matchers[0] != "Bash" {
+		t.Fatalf("matchers = %v, want just Bash", reg.matchers)
+	}
+	missing := reg.missing()
+	if len(missing) != 1 || missing[0] != "PowerShell" {
+		t.Errorf("missing() = %v, want PowerShell", missing)
+	}
+}
+
+func TestInspectClaudeRegistrationIsQuietWhenCurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	current, err := rewriteClaudeSettings(nil, "/bin/policygate --host claude", testProgramNames, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, current, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if missing := inspectClaudeRegistration(path, testProgramNames).missing(); len(missing) != 0 {
+		t.Errorf("missing() = %v, want none for a registration just written", missing)
+	}
+}
+
+// A file that registers other hooks but not policygate is a host this user has
+// not set up. Reporting it as incomplete would be noise.
+func TestInspectClaudeRegistrationIgnoresUnrelatedHooks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	const other = `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/usr/local/bin/other-tool"}]}]}}`
+	if err := os.WriteFile(path, []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := inspectClaudeRegistration(path, testProgramNames)
+	if len(reg.matchers) != 0 || len(reg.missing()) != 0 {
+		t.Errorf("matchers = %v, missing = %v, want both empty", reg.matchers, reg.missing())
 	}
 }

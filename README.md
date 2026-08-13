@@ -9,6 +9,10 @@ PolicyApprovalGate is a PreToolUse hook that applies rule-based policies before 
 
 The built-in rules are intended to reduce missed, clearly dangerous operations, not to block every possible risk. By default, operations that cannot be classified are delegated to the host's normal approval flow.
 
+![Claude Code blocked from reading ~/.ssh](images/ss.gif)
+
+Claude Code stopped from reading `~/.ssh`. The reason for the decision is what the host shows the user.
+
 ## Features
 
 - Deterministic rule evaluation without AI or an LLM
@@ -54,7 +58,7 @@ Fixture/golden compatibility baseline as of 2026-08-11:
 
 CI exercises input fixtures and golden return JSON to detect host-contract drift.
 
-The currently supported runtime platforms are macOS and Linux. Windows is built and unit-tested in CI and carries PowerShell dialect detection and deny rules, but remains experimental until paths can be extracted from PowerShell commands. See "PowerShell" for what that means in practice.
+The currently supported runtime platforms are macOS and Linux. Windows is built and unit-tested in CI and carries PowerShell dialect detection, deny rules, and path extraction, but remains experimental because PowerShell shell syntax is not fully parsed. See "PowerShell" for what does and does not apply.
 
 ## Quick start
 
@@ -103,6 +107,7 @@ policygate install-hook --host codex    # ~/.codex/config.toml
 | --- | --- |
 | `--user` | Register Claude Code in `~/.claude/settings.json` instead of the project's `.claude/settings.json` |
 | `--path PATH` | Name the file to register in |
+| `--config PATH` | Include `--config PATH` in the registered command, for a per-host policy |
 | `--dry-run` | Print what would be written without writing it |
 
 Registration is idempotent and preserves existing settings. The file is backed up before it is replaced, and the replacement is atomic. Use `uninstall-hook` to remove it.
@@ -124,6 +129,25 @@ See [configs/claude-code.settings.example.json](configs/claude-code.settings.exa
 **On Windows, separate the path with forward slashes** (`D:/bin/policygate.exe`). Backslashes break either way: inside a JSON string `\b` reads as a backspace, and a host that passes the command to a shell drops each backslash as an escape. Windows accepts forward slashes as path separators.
 
 `install-hook` resolves the path and its separators for you, so none of this applies when you use it.
+
+### Updating an existing installation
+
+**Run both. Either one alone leaves a gap.**
+
+```bash
+policygate init --upgrade                      # update the rules
+policygate install-hook --host claude --user   # update the registration
+policygate doctor                              # check both
+```
+
+Neither the configuration file nor the hook registration updates itself, and **whichever one is behind stays silent about it**, so running only one leaves nothing to notice.
+
+| Left un-updated | Consequence |
+| --- | --- |
+| Rules (`init --upgrade`) | New deny rules never apply, because a user configuration replaces a rule list wholesale |
+| Registration (`install-hook`) | A tool that became covered later — such as the `PowerShell` tool of Claude Code on Windows — **never reaches policygate at all** |
+
+This happened: a Windows machine with current rules and an older registration listed `~/.ssh` without a prompt. `policygate doctor` reports either shortfall.
 
 ## Host behavior
 
@@ -171,21 +195,27 @@ Note how far that conversion reaches: under Codex, `unknown.action: ask` **rejec
 
 ### Separate configuration files per host
 
-The configuration has no per-host settings. If you use both hosts and want them to behave differently — `ask` under Claude Code but `defer` under Codex, for example — point each hook registration at its own file with `POLICYGATE_CONFIG`. The configuration is read on every hook call, so each host can carry an independent policy.
+The configuration has no per-host settings. If you use both hosts and want them to behave differently — `ask` under Claude Code but `defer` under Codex, for example — point each hook registration at its own file with `--config`. The configuration is read on every hook call, so each host can carry an independent policy.
 
-Claude Code (`settings.json`):
+`install-hook` writes the finished registration:
 
-```json
-"command": "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/claude.yaml /usr/local/bin/policygate --host claude"
+```bash
+policygate install-hook --host claude --config /absolute/home/path/.policygate/claude.yaml
+policygate install-hook --host codex  --config /absolute/home/path/.policygate/codex.yaml
 ```
 
-Codex (`~/.codex/config.toml`):
+which registers a command of the form:
 
-```toml
-command = "/usr/bin/env POLICYGATE_CONFIG=/absolute/home/path/.policygate/codex.yaml /usr/local/bin/policygate --host codex"
+```
+/absolute/path/policygate --host codex --config /absolute/home/path/.policygate/codex.yaml
 ```
 
-Keep both files under the user's `.policygate` directory and retain the generated `.policygate` entry in enabled `protected_paths`, so writes and deletes to them are denied. The paths above are placeholders; replace them with the absolute paths to `~/.policygate/claude.yaml` and `~/.policygate/codex.yaml`. `~` and `$HOME` are expanded only when the host runs the command through a shell, and an unexpanded value leaves the configuration file unreadable. If a policy must live elsewhere, add its path to `protected_paths.patterns` before registering the hook.
+> [!IMPORTANT]
+> **Do not use the `/usr/bin/env POLICYGATE_CONFIG=... policygate` form.** Windows has no `/usr/bin/env`, and Codex spawns the command directly, so **the hook fails to start — and Codex then runs the command without reporting it** (measured on Windows 11). The registration looks present and trusted while the gate is entirely inert. `--config` has no such failure mode.
+
+The `POLICYGATE_CONFIG` environment variable still works, but `--config` takes precedence over it. An environment variable applies to the whole process, which makes it a poor fit when only one host should be affected.
+
+Keep both files under the user's `.policygate` directory and retain the generated `.policygate` entry in enabled `protected_paths`, so writes and deletes to them are denied. **Give `--config` an absolute path.** `~` and `$HOME` are expanded only when the host runs the command through a shell, and an unexpanded value leaves the configuration file unreadable. If a policy must live elsewhere, add its path to `protected_paths.patterns` before registering the hook.
 
 The policy now lives in two files, so take care that shared parts such as deny rules stay in sync. Note also that an unreadable path makes enforce mode deny the Bash call, so validate each file with `policygate check-config --config <path>` before registering the hook.
 

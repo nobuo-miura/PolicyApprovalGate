@@ -202,6 +202,7 @@ func runDoctor(args []string) int {
 	} else {
 		fmt.Printf("self-protection: %s\n", strings.Join(guarded, ", "))
 	}
+	reportHookRegistrations()
 	host := resolveHost()
 	fmt.Printf("host: %s\n", host)
 	// The dialect follows from the host and the platform, so a misconfigured
@@ -215,6 +216,35 @@ func runDoctor(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// reportHookRegistrations shows which matchers each Claude Code settings file
+// registers policygate under.
+//
+// Upgrading the rules and upgrading the registration are separate steps, and
+// only the first announces itself. A settings file written before the
+// PowerShell matcher existed keeps working, reports nothing, and lets every
+// PowerShell command past - which is how a machine with current rules was found
+// listing ~/.ssh without a prompt.
+func reportHookRegistrations() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	for _, reg := range claudeRegistrations(hookProgramNames(exe)) {
+		switch {
+		case !reg.exists:
+			continue
+		case len(reg.matchers) == 0:
+			fmt.Printf("hook: %s: present, no policygate registration\n", reg.path)
+		default:
+			fmt.Printf("hook: %s: registered for %s\n", reg.path, strings.Join(reg.matchers, ", "))
+			if absent := reg.missing(); len(absent) > 0 {
+				fmt.Printf("hook warning: %s: not registered for %s, so those tools are never examined; re-run `policygate install-hook --host claude`\n",
+					reg.path, strings.Join(absent, ", "))
+			}
+		}
+	}
 }
 
 func writeConfigAtomically(path string, data []byte) error {

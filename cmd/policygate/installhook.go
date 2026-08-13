@@ -38,7 +38,7 @@ func runHookRegistration(args []string, install bool) int {
 		name = "install-hook"
 	}
 
-	var host, override string
+	var host, override, policy string
 	dryRun, user := false, false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -63,6 +63,12 @@ func runHookRegistration(args []string, install bool) int {
 			}
 		case strings.HasPrefix(arg, "--path="):
 			override = strings.TrimPrefix(arg, "--path=")
+		case arg == "--config":
+			if policy, ok = value(); !ok {
+				return usageErrorf(name, "--config requires a value")
+			}
+		case strings.HasPrefix(arg, "--config="):
+			policy = strings.TrimPrefix(arg, "--config=")
 		case arg == "--dry-run":
 			dryRun = true
 		case arg == "--user":
@@ -91,7 +97,7 @@ func runHookRegistration(args []string, install bool) int {
 		fmt.Fprintf(os.Stderr, "policygate %s: resolve own path: %v\n", name, err)
 		return 1
 	}
-	command := hookCommand(exe, host)
+	command := hookCommand(exe, host, policy)
 	programNames := hookProgramNames(exe)
 
 	original, err := os.ReadFile(target)
@@ -194,8 +200,17 @@ func hookConfigPath(host string, user bool, override string) (string, error) {
 // "D:\bin\policygate.exe" reads \b as a backspace, and a host that hands the
 // command to a shell sees each backslash as an escape and drops it. Windows
 // accepts forward slashes as separators, so the rewritten path still runs.
-func hookCommand(exe, host string) string {
-	return quoteHookPath(hookPathSeparators(exe)) + " --host " + host
+// A policy file is named with --config rather than through the environment.
+// The documented alternative wraps the binary in /usr/bin/env, which Windows
+// does not have: Codex spawns the command directly, fails to start it, and -
+// measured on Windows 11 - runs the command anyway with nothing to show that
+// the gate never ran.
+func hookCommand(exe, host, policy string) string {
+	command := quoteHookPath(hookPathSeparators(exe)) + " --host " + host
+	if policy != "" {
+		command += " --config " + quoteHookPath(hookPathSeparators(policy))
+	}
+	return command
 }
 
 // hookPathSeparators normalizes the separators of a Windows path.
@@ -634,4 +649,80 @@ func (o *orderedObject) MarshalJSON() ([]byte, error) {
 	}
 	b.WriteByte('}')
 	return b.Bytes(), nil
+}
+
+// hookRegistration is what a host's configuration currently registers.
+type hookRegistration struct {
+	path     string
+	exists   bool
+	matchers []string
+}
+
+// missing reports the matchers a registration lacks. Only a file that already
+// registers policygate is worth reporting on: one that registers nothing is a
+// host this user has not set up, not a broken setup.
+func (r hookRegistration) missing() []string {
+	if len(r.matchers) == 0 {
+		return nil
+	}
+	have := make(map[string]bool, len(r.matchers))
+	for _, m := range r.matchers {
+		have[m] = true
+	}
+	var absent []string
+	for _, want := range claudeMatchers {
+		if !have[want] {
+			absent = append(absent, want)
+		}
+	}
+	return absent
+}
+
+// inspectClaudeRegistration reports which matchers a settings file registers
+// policygate under.
+//
+// A registration written before a matcher was added stays as it was: nothing
+// rewrites it, and the gate reports no problem while a whole tool goes past it
+// unexamined. That happened - a Claude Code registered before the PowerShell
+// matcher existed listed ~/.ssh without a word, on a machine whose rules were
+// already up to date. Rules and registration are upgraded separately, so both
+// have to be checked.
+func inspectClaudeRegistration(path string, programNames []string) hookRegistration {
+	reg := hookRegistration{path: path}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return reg
+	}
+	reg.exists = true
+
+	var parsed struct {
+		Hooks struct {
+			PreToolUse []claudeMatcherGroup `json:"PreToolUse"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return reg
+	}
+	for _, group := range parsed.Hooks.PreToolUse {
+		for _, entry := range group.Hooks {
+			if namesPolicygate(entry.Command, programNames) {
+				reg.matchers = append(reg.matchers, group.Matcher)
+				break
+			}
+		}
+	}
+	return reg
+}
+
+// claudeRegistrations reports the settings files a Claude Code hook can live in.
+func claudeRegistrations(programNames []string) []hookRegistration {
+	var out []hookRegistration
+	for _, user := range []bool{false, true} {
+		path, err := hookConfigPath("claude", user, "")
+		if err != nil {
+			continue
+		}
+		out = append(out, inspectClaudeRegistration(path, programNames))
+	}
+	return out
 }
