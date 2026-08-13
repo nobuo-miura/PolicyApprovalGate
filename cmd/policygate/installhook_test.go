@@ -38,6 +38,13 @@ func TestNamesPolicygateRecognizesRegistrations(t *testing.T) {
 		// program being run.
 		"/usr/local/bin/audit --tool=policygate",
 		"/usr/local/bin/audit --exclude policygate-old",
+		// The name alone is not a registration. Another tool taking a path to
+		// policygate as an argument must not be mistaken for one, or uninstall
+		// deletes somebody else's hook.
+		"/usr/local/bin/audit-tool --exclude /tmp/policygate",
+		"/usr/local/bin/watch /opt/homebrew/bin/policygate",
+		"/usr/local/bin/policygate",
+		"/usr/local/bin/policygate --version",
 	}
 	for _, cmd := range other {
 		if namesPolicygate(cmd, testProgramNames) {
@@ -79,7 +86,13 @@ func TestRewriteClaudeSettingsCreatesRegistration(t *testing.T) {
 	}
 	var parsed struct {
 		Hooks struct {
-			PreToolUse []claudeMatcherGroup `json:"PreToolUse"`
+			PreToolUse []struct {
+				Matcher string `json:"matcher"`
+				Hooks   []struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"PreToolUse"`
 		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
@@ -411,5 +424,97 @@ func TestInspectClaudeRegistrationIgnoresUnrelatedHooks(t *testing.T) {
 	reg := inspectClaudeRegistration(path, testProgramNames)
 	if len(reg.matchers) != 0 || len(reg.missing()) != 0 {
 		t.Errorf("matchers = %v, missing = %v, want both empty", reg.matchers, reg.missing())
+	}
+}
+
+// A hook may carry fields this program knows nothing about - a timeout, args,
+// an async flag. Decoding a group into a struct and re-encoding it drops every
+// one of them, which would mean installing policygate beside another tool
+// quietly broke that tool's configuration.
+func TestRewriteClaudeSettingsPreservesUnknownFieldsOnOtherHooks(t *testing.T) {
+	original := []byte(`{"hooks":{"PreToolUse":[{"matcher":"Bash","description":"team hooks","hooks":[` +
+		`{"type":"command","command":"/usr/local/bin/other-tool","timeout":30,"async":true,"args":["--strict"]}` +
+		`]}]}}`)
+
+	// Installing beside it appends to the same group, which re-encodes it;
+	// uninstalling removes policygate from that group and re-encodes it again.
+	installed, err := rewriteClaudeSettings(original, "/bin/policygate --host claude", testProgramNames, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err := rewriteClaudeSettings(installed, "/bin/policygate --host claude", testProgramNames, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range []struct {
+		name string
+		out  []byte
+	}{{"install", installed}, {"uninstall", removed}} {
+		neighbour := findHookEntry(t, stage.out, "/usr/local/bin/other-tool")
+		for field, want := range map[string]any{
+			"timeout": float64(30),
+			"async":   true,
+		} {
+			if got := neighbour[field]; got != want {
+				t.Errorf("%s: neighbouring hook lost %q: got %v, want %v", stage.name, field, got, want)
+			}
+		}
+		args, _ := neighbour["args"].([]any)
+		if len(args) != 1 || args[0] != "--strict" {
+			t.Errorf("%s: neighbouring hook lost its args: %v", stage.name, neighbour["args"])
+		}
+		// A field on the group itself has to survive too.
+		if !strings.Contains(string(stage.out), "team hooks") {
+			t.Errorf("%s: the group lost its description: %s", stage.name, stage.out)
+		}
+	}
+	if strings.Contains(string(removed), "policygate") {
+		t.Errorf("the registration survived uninstall: %s", removed)
+	}
+}
+
+// findHookEntry returns the PreToolUse hook whose command is want.
+func findHookEntry(t *testing.T, settings []byte, want string) map[string]any {
+	t.Helper()
+	var parsed struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Hooks []map[string]any `json:"hooks"`
+			} `json:"PreToolUse"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(settings, &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, settings)
+	}
+	for _, group := range parsed.Hooks.PreToolUse {
+		for _, entry := range group.Hooks {
+			if entry["command"] == want {
+				return entry
+			}
+		}
+	}
+	t.Fatalf("no hook with command %q in %s", want, settings)
+	return nil
+}
+
+// The project settings file is shared and committed, and the registration
+// carries this machine's absolute path to the binary. Writing there publishes a
+// local path and hands teammates a hook pointing at a binary they do not have.
+func TestHookConfigPathDefaultsToTheLocalSettingsFile(t *testing.T) {
+	got, err := hookConfigPath("claude", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(got) != "settings.local.json" {
+		t.Errorf("hookConfigPath(claude) = %q, want the local settings file", got)
+	}
+
+	// --user names the user-level file, which is not shared.
+	got, err = hookConfigPath("claude", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(got) != "settings.json" {
+		t.Errorf("hookConfigPath(claude, user) = %q, want ~/.claude/settings.json", got)
 	}
 }

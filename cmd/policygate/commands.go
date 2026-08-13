@@ -160,7 +160,7 @@ func unanalyzedAskWarning(cfg *rules.Config) string {
 	if len(sections) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s: Codex sends PowerShell for every command on Windows and converts ask to deny, which would reject ordinary work there; give Codex its own file through POLICYGATE_CONFIG with unanalyzed_action: defer, understanding that PowerShell is then matched as text only",
+	return fmt.Sprintf("%s: Codex sends PowerShell for every command on Windows and converts ask to deny, which would reject ordinary work there; register Codex with `policygate install-hook --host codex --config <path>` and set unanalyzed_action: defer in that file, accepting that a PowerShell command whose paths cannot be resolved is then deferred rather than asked about",
 		strings.Join(sections, " and "))
 }
 
@@ -210,7 +210,7 @@ func runDoctor(args []string) int {
 	shell := resolveDialect(host, "Bash")
 	fmt.Printf("shell dialect: %s (structural analysis: %t)\n", shell, shell.Analyzable())
 	if shell != dialect.POSIX {
-		fmt.Println("shell warning: this host sends a dialect policygate cannot analyze structurally; only text rules apply")
+		fmt.Println("shell warning: this host sends a dialect policygate does not fully parse; rules apply to the command text and to the paths recoverable from it, but a command whose paths cannot be resolved falls to unanalyzed_action")
 	}
 	if failures != 0 {
 		return 1

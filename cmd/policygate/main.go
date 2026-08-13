@@ -646,7 +646,7 @@ func unmatchedReason(shell dialect.Dialect) string {
 	if shell.Analyzable() {
 		return "no rule matched"
 	}
-	return fmt.Sprintf("no rule matched, and %s commands are matched as text only: policygate could not examine this one", shell)
+	return fmt.Sprintf("no rule matched, and %s is not fully parsed: policygate could not establish what this command touches", shell)
 }
 
 func actionDecision(a rules.ActionConfig, shell dialect.Dialect, reason string) (hook.Decision, string) {
@@ -957,12 +957,14 @@ func warnOnDialectMismatch(shell dialect.Dialect, cmd string) {
 // resolveConfigFlag reads a --config given on the hook command line.
 //
 // It exists because naming the configuration through the environment is not
-// portable. The documented way to give each host its own policy wraps the
-// binary in /usr/bin/env, and Windows has no such program: Codex spawns the
-// command directly, fails to start it, and - measured on Windows 11 - runs the
-// command anyway without a word. A gate that is registered, trusted, and
-// completely inert is the worst failure this can have, so the configuration has
-// to be nameable without a wrapper.
+// portable. Wrapping the binary in /usr/bin/env, the way a per-host policy used
+// to be documented, cannot work on Windows: there is no such program, Codex
+// spawns the command directly, and the hook never starts. A hook that fails to
+// start does not stop the tool call - that is how hooks are specified - so the
+// command runs against a gate that was never consulted. Measured on Codex CLI
+// 0.147.0 under Windows 11, nothing reached the audit log. A gate that is
+// registered, trusted, and inert is the worst failure this can have, so the
+// configuration has to be nameable without a wrapper.
 func resolveConfigFlag() string {
 	for i, a := range os.Args {
 		if a == "--config" && i+1 < len(os.Args) {

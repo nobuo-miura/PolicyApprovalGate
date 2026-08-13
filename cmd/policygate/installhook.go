@@ -187,7 +187,13 @@ func hookConfigPath(host string, user bool, override string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve working directory: %w", err)
 		}
-		return filepath.Join(cwd, ".claude", "settings.json"), nil
+		// settings.local.json rather than settings.json: the registration
+		// carries this machine's absolute path to the binary, and
+		// settings.json is the project file Claude Code expects to be shared
+		// and committed. Writing there publishes a local path - the user's
+		// name among it - and hands every teammate a hook pointing at a
+		// binary they do not have.
+		return filepath.Join(cwd, ".claude", "settings.local.json"), nil
 	}
 }
 
@@ -201,10 +207,11 @@ func hookConfigPath(host string, user bool, override string) (string, error) {
 // command to a shell sees each backslash as an escape and drops it. Windows
 // accepts forward slashes as separators, so the rewritten path still runs.
 // A policy file is named with --config rather than through the environment.
-// The documented alternative wraps the binary in /usr/bin/env, which Windows
-// does not have: Codex spawns the command directly, fails to start it, and -
-// measured on Windows 11 - runs the command anyway with nothing to show that
-// the gate never ran.
+// The alternative wraps the binary in /usr/bin/env, which Windows does not
+// have: Codex spawns the command directly and the hook never starts. A hook
+// that fails to start does not stop the tool call, so the command runs against
+// a gate that was never consulted; measured on Codex CLI 0.147.0 under Windows
+// 11, nothing reached the audit log.
 func hookCommand(exe, host, policy string) string {
 	command := quoteHookPath(hookPathSeparators(exe)) + " --host " + host
 	if policy != "" {
@@ -257,24 +264,40 @@ func quoteHookPath(p string) string {
 //
 //	/usr/bin/env POLICYGATE_CONFIG=/path/claude.yaml /path/policygate --host claude
 //
-// Flags and assignments are skipped so an unrelated hook that merely mentions
-// the name in an argument is left alone.
+// A match also requires the --host flag that every registration this program
+// writes carries, immediately after the program. Recognizing the name alone
+// would make `audit-tool --exclude /tmp/policygate` look like a registration,
+// and uninstall would delete somebody else's hook. Erring toward leaving a
+// stranger's configuration alone is worth the occasional duplicate.
 func namesPolicygate(command string, programNames []string) bool {
 	// Quotes become separators: a quoted path containing spaces still yields a
 	// token ending in the program name.
 	unquoted := strings.NewReplacer("'", " ", `"`, " ").Replace(command)
-	for _, token := range strings.Fields(unquoted) {
+	tokens := strings.Fields(unquoted)
+	for i, token := range tokens {
 		if token == "" || strings.HasPrefix(token, "-") || strings.Contains(token, "=") {
 			continue
 		}
 		base := programBase(token)
+		named := false
 		for _, name := range programNames {
 			if base == name {
-				return true
+				named = true
+				break
 			}
+		}
+		if !named {
+			continue
+		}
+		if i+1 < len(tokens) && isHostFlag(tokens[i+1]) {
+			return true
 		}
 	}
 	return false
+}
+
+func isHostFlag(token string) bool {
+	return token == "--host" || strings.HasPrefix(token, "--host=")
 }
 
 // programBase returns the last element of a path token, honouring both
@@ -339,14 +362,65 @@ func writeHookConfig(target string, data []byte) error {
 
 // --- Claude Code: JSON ---
 
+// claudeHookEntry is the shape this program writes. It is deliberately not the
+// shape it reads: a hook may carry fields this program knows nothing about.
 type claudeHookEntry struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
 }
 
-type claudeMatcherGroup struct {
-	Matcher string            `json:"matcher"`
-	Hooks   []claudeHookEntry `json:"hooks"`
+// claudeGroup is one matcher group, held as an ordered object so a rewrite
+// carries through everything it does not own.
+//
+// Decoding a group into a struct and re-encoding it silently drops every field
+// the struct lacks. A neighbouring hook's timeout, args, or async setting would
+// disappear the moment policygate was installed beside it - a tool that edits
+// someone else's configuration has no business quietly discarding parts of it,
+// and the documentation promises the opposite.
+type claudeGroup struct {
+	object  *orderedObject
+	matcher string
+	hooks   []json.RawMessage
+}
+
+func parseClaudeGroup(raw json.RawMessage) (*claudeGroup, bool) {
+	object, err := parseOrderedObject(raw)
+	if err != nil {
+		return nil, false
+	}
+	group := &claudeGroup{object: object}
+	if value, ok := object.get("matcher"); ok {
+		if err := json.Unmarshal(value, &group.matcher); err != nil {
+			return nil, false
+		}
+	}
+	if value, ok := object.get("hooks"); ok {
+		if err := json.Unmarshal(value, &group.hooks); err != nil {
+			return nil, false
+		}
+	}
+	return group, true
+}
+
+func (g *claudeGroup) encode() (json.RawMessage, error) {
+	hooks, err := json.Marshal(g.hooks)
+	if err != nil {
+		return nil, err
+	}
+	g.object.set("hooks", hooks)
+	return g.object.MarshalJSON()
+}
+
+// commandOfHookEntry reads just the command out of an entry, leaving the rest
+// of it untouched.
+func commandOfHookEntry(raw json.RawMessage) string {
+	var entry struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return ""
+	}
+	return entry.Command
 }
 
 // rewriteClaudeSettings adds or removes the policygate PreToolUse hook. Every
@@ -425,27 +499,27 @@ func rewriteClaudeSettings(original []byte, command string, programNames []strin
 func withoutPolicygateHooks(groups []json.RawMessage, programNames []string) ([]json.RawMessage, error) {
 	var kept []json.RawMessage
 	for _, raw := range groups {
-		var group claudeMatcherGroup
-		if err := json.Unmarshal(raw, &group); err != nil {
+		group, ok := parseClaudeGroup(raw)
+		if !ok {
 			// A group shaped differently is not ours; leave it alone.
 			kept = append(kept, raw)
 			continue
 		}
-		remaining := make([]claudeHookEntry, 0, len(group.Hooks))
-		for _, entry := range group.Hooks {
-			if !namesPolicygate(entry.Command, programNames) {
+		remaining := make([]json.RawMessage, 0, len(group.hooks))
+		for _, entry := range group.hooks {
+			if !namesPolicygate(commandOfHookEntry(entry), programNames) {
 				remaining = append(remaining, entry)
 			}
 		}
-		if len(remaining) == len(group.Hooks) {
+		if len(remaining) == len(group.hooks) {
 			kept = append(kept, raw)
 			continue
 		}
 		if len(remaining) == 0 {
 			continue
 		}
-		group.Hooks = remaining
-		encoded, err := json.Marshal(group)
+		group.hooks = remaining
+		encoded, err := group.encode()
 		if err != nil {
 			return nil, err
 		}
@@ -481,20 +555,31 @@ func withPolicygateHook(groups []json.RawMessage, command string) ([]json.RawMes
 // is one, so a user who already registered other hooks for that tool keeps a
 // single group.
 func withMatcherGroup(groups []json.RawMessage, matcher string, entry claudeHookEntry) ([]json.RawMessage, error) {
+	encodedEntry, err := json.Marshal(entry)
+	if err != nil {
+		return nil, err
+	}
 	for i, raw := range groups {
-		var group claudeMatcherGroup
-		if err := json.Unmarshal(raw, &group); err != nil || group.Matcher != matcher {
+		group, ok := parseClaudeGroup(raw)
+		if !ok || group.matcher != matcher {
 			continue
 		}
-		group.Hooks = append(group.Hooks, entry)
-		encoded, err := json.Marshal(group)
+		group.hooks = append(group.hooks, encodedEntry)
+		encoded, err := group.encode()
 		if err != nil {
 			return nil, err
 		}
 		groups[i] = encoded
 		return groups, nil
 	}
-	encoded, err := json.Marshal(claudeMatcherGroup{Matcher: matcher, Hooks: []claudeHookEntry{entry}})
+	fresh := newOrderedObject()
+	encodedMatcher, err := json.Marshal(matcher)
+	if err != nil {
+		return nil, err
+	}
+	fresh.set("matcher", encodedMatcher)
+	group := &claudeGroup{object: fresh, matcher: matcher, hooks: []json.RawMessage{encodedEntry}}
+	encoded, err := group.encode()
 	if err != nil {
 		return nil, err
 	}
@@ -697,16 +782,20 @@ func inspectClaudeRegistration(path string, programNames []string) hookRegistrat
 
 	var parsed struct {
 		Hooks struct {
-			PreToolUse []claudeMatcherGroup `json:"PreToolUse"`
+			PreToolUse []json.RawMessage `json:"PreToolUse"`
 		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return reg
 	}
-	for _, group := range parsed.Hooks.PreToolUse {
-		for _, entry := range group.Hooks {
-			if namesPolicygate(entry.Command, programNames) {
-				reg.matchers = append(reg.matchers, group.Matcher)
+	for _, raw := range parsed.Hooks.PreToolUse {
+		group, ok := parseClaudeGroup(raw)
+		if !ok {
+			continue
+		}
+		for _, entry := range group.hooks {
+			if namesPolicygate(commandOfHookEntry(entry), programNames) {
+				reg.matchers = append(reg.matchers, group.matcher)
 				break
 			}
 		}

@@ -184,8 +184,8 @@ protected_paths:
 #
 # Codex on Windows sends PowerShell for every command and converts ask to deny,
 # so leaving this at ask there rejects ordinary work. Give Codex its own file
-# through POLICYGATE_CONFIG with unanalyzed_action: defer, and read the
-# limitations before deciding that is acceptable.
+# with `policygate install-hook --host codex --config <path>` and set
+# unanalyzed_action: defer in it, after reading the limitations.
 unknown:
   action: defer # defer | ask | deny
   unanalyzed_action: ask # defer | ask | deny

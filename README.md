@@ -2,361 +2,303 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
-PolicyApprovalGate is a PreToolUse hook that applies rule-based policies before Claude Code or Codex CLI runs a Bash command. It checks dangerous commands, pushes to protected branches, and access to out-of-project or sensitive paths, then records decisions in an audit log.
+PolicyApprovalGate is a PreToolUse hook that checks shell commands against local rules before Claude Code or Codex CLI runs them.
+
+It detects dangerous commands, pushes to protected branches, and access to out-of-project or sensitive paths, then records the decision in an audit log. It does not use AI or an LLM, so the same input always produces the same result.
 
 > [!IMPORTANT]
-> PolicyApprovalGate complements your existing permission model, sandbox, and human review. It is neither a complete shell analyzer nor a security boundary, and should not be your only line of defense.
-
-The built-in rules are intended to reduce missed, clearly dangerous operations, not to block every possible risk. By default, operations that cannot be classified are delegated to the host's normal approval flow.
+> PolicyApprovalGate complements the host permission model, sandbox, and human review. It is neither a complete shell analyzer nor a security boundary, and should not be your only line of defense.
 
 ![Claude Code blocked from reading ~/.ssh](images/ss.gif)
 
-Claude Code stopped from reading `~/.ssh`. The reason for the decision is what the host shows the user.
+In this example, PolicyApprovalGate blocks Claude Code from reading `~/.ssh` and returns the reason to the host.
 
 ## Features
 
-- Deterministic rule evaluation without AI or an LLM
-- Regex-based denial of dangerous commands
-- Regex-based ask rules that prompt in Claude Code and are converted to deny in Codex
-- Structural, always-on denial of recursive force-deletion targeting the filesystem root or current user's home
+- Deterministic decisions based on regex rules and structural analysis
+- Always-on denial of recursive force-deletion targeting the filesystem root or current user's home
 - Controls for force pushes, deletion, and direct pushes to protected branches
-- Read / write / delete classification for path access
-- Policies for out-of-project, sensitive, and protected paths
-- Case-insensitive rule matching, so a filesystem that ignores case cannot be used to slip past a rule
-- Writes and deletes to its own executable denied structurally, wherever it is installed, with nothing to configure
-- Hook registration through `install-hook`: resolves the absolute path, idempotent, preserves existing settings
-- Path tracking that accounts for `cd` and symbolic links
-- Normalization for `env` / `command`, `git -C`, and `cp/install -t`
-- Analysis of statically quoted paths and critical deletes inside literal `sh/bash/zsh -c` and `eval` scripts
-- Rotating audit logs with redacted, hashed, full, or omitted commands
-- Configuration migration, validation, and diagnostics
-- Host-specific decision handling through `--host`
-
-## Evaluation order
-
-1. Check deny rules
-2. Parse the shell command
-3. Check pushes to protected branches
-4. Check ask rules (prompt in Claude Code; convert to deny in Codex)
-5. Check path scope, sensitive paths, and protected paths
-6. Classify every subcommand against allow rules for audit metadata
-7. Apply `unknown.action` when nothing matches
-
-An explicit denial always wins. By default, an unknown command is deferred to the host's normal approval flow rather than denied.
+- Read / write / delete classification for file access
+- Policies for out-of-project paths, sensitive files, and PolicyApprovalGate's own configuration
+- Path tracking that accounts for `cd`, existing symlinks, and symlinks created in the same command
+- Normalization for `env` / `command` wrappers, `git -C`, `cp/install -t`, and related forms
+- Host-specific handling for Claude Code `ask` decisions and Codex deny conversion
+- PowerShell dialect detection, dangerous-command rules, and bounded path extraction on Windows
+- Audit log rotation, hashing, and secret redaction
+- CLI commands for configuration, upgrades, validation, diagnostics, and hook registration
 
 ## Requirements
 
 - Go 1.26
-- PreToolUse hooks in Claude Code or Codex CLI
+- Claude Code or Codex CLI with PreToolUse hooks
 
-Fixture/golden compatibility baseline as of 2026-08-11:
+macOS and Linux are the normally supported runtime platforms. Windows is also built and unit-tested in CI, but remains experimental because PowerShell is not fully parsed. See [Windows and PowerShell](#windows-and-powershell) for details.
 
-| Host | Locally checked version |
+The fixture and golden tests use these host versions as their compatibility baseline as of August 11, 2026:
+
+| Host | Tested version |
 | --- | --- |
 | Codex CLI | 0.147.0 |
 | Claude Code | 2.1.220 |
 
-CI exercises input fixtures and golden return JSON to detect host-contract drift.
-
-The currently supported runtime platforms are macOS and Linux. Windows is built and unit-tested in CI and carries PowerShell dialect detection, deny rules, and path extraction, but remains experimental because PowerShell shell syntax is not fully parsed. See "PowerShell" for what does and does not apply.
-
 ## Quick start
 
-### 1. Build
+### 1. Build and install
 
 ```bash
 go build -o policygate ./cmd/policygate
 sudo install -m 0755 policygate /usr/local/bin/policygate
 ```
 
-After a tagged release, you can also install through Go. Configure the hook with the actual absolute path under `GOBIN` or `GOPATH/bin`.
+Tagged releases can also be installed through Go:
 
 ```bash
 go install github.com/nobuo-miura/policyapprovalgate/cmd/policygate@latest
 ```
 
-### 2. Create a configuration file
+### 2. Create a configuration
 
 ```bash
 policygate init
 ```
 
-This creates `~/.policygate/config.yaml` by default. Set `POLICYGATE_CONFIG` to use another path. Existing files are not overwritten.
-
-Merge new baseline protections into an older configuration with:
-
-```bash
-policygate init --upgrade
-policygate check-config
-```
-
-`--upgrade` writes a `config.yaml.bak.*` copy beside the existing file before replacing it atomically.
-
-List-valued sections in a user configuration (`deny`, `ask`, `allow`, `sensitive_paths.patterns`, and `protected_paths.patterns`) replace the built-in list at load time rather than merging into it. `--upgrade` therefore matches built-in rules by `pattern`, appends the ones the configuration no longer carries, and reports each restored rule as a warning. A rule you removed on purpose can come back, so read the warnings and delete anything you do not want.
+This creates `~/.policygate/config.yaml` by default and never overwrites an existing file. Set `POLICYGATE_CONFIG` to create it elsewhere.
 
 ### 3. Register the hook
 
-`install-hook` resolves its own absolute path and writes the registration, so there is no configuration file to edit by hand.
-
 ```bash
-policygate install-hook --host claude   # ./.claude/settings.json
+policygate install-hook --host claude   # ./.claude/settings.local.json
 policygate install-hook --host codex    # ~/.codex/config.toml
 ```
 
-| Flag | Purpose |
-| --- | --- |
-| `--user` | Register Claude Code in `~/.claude/settings.json` instead of the project's `.claude/settings.json` |
-| `--path PATH` | Name the file to register in |
-| `--config PATH` | Include `--config PATH` in the registered command, for a per-host policy |
-| `--dry-run` | Print what would be written without writing it |
+`install-hook` registers the absolute path of the running binary. It is idempotent, preserves existing settings, and replaces the file atomically. When an existing file changes, PolicyApprovalGate writes a backup first.
 
-Registration is idempotent and preserves existing settings. The file is backed up before it is replaced, and the replacement is atomic. Use `uninstall-hook` to remove it.
+Claude Code defaults to `.claude/settings.local.json` because the registration contains a machine-specific absolute path. It does not write that path to the shared, committable `.claude/settings.json`. To enable the hook for every project, use the user-level setting instead:
 
 ```bash
-policygate uninstall-hook --host claude
+policygate install-hook --host claude --user
 ```
 
-The Codex registration is appended as a block delimited by marker comments, so nothing else in the file is touched. Claude Code's `settings.json` is read and rewritten as JSON; every key other than `hooks` keeps its value and its position, though indentation is normalized to two spaces.
+After registering with Codex, run `/hooks`, review the displayed definition, and trust it. Codex skips hooks that are untrusted or have changed since they were trusted.
 
-Codex hooks are enabled by default. `codex_hooks` is a deprecated alias; the canonical feature key is now `hooks`. See the [official Codex Hooks documentation](https://learn.chatgpt.com/docs/hooks) for details.
-
-**After registering the hook, run `/hooks` in Codex, review the displayed command definition, and trust it. An untrusted or changed hook is skipped.**
-
-#### Registering by hand
-
-See [configs/claude-code.settings.example.json](configs/claude-code.settings.example.json) and [configs/codex-config.example.toml](configs/codex-config.example.toml) for complete examples. Give `command` the absolute path to policygate. A `~` or `$HOME` is expanded only when the host runs the command through a shell, and an unexpanded value leaves the hook unable to run.
-
-**On Windows, separate the path with forward slashes** (`D:/bin/policygate.exe`). Backslashes break either way: inside a JSON string `\b` reads as a backspace, and a host that passes the command to a shell drops each backslash as an escape. Windows accepts forward slashes as path separators.
-
-`install-hook` resolves the path and its separators for you, so none of this applies when you use it.
-
-### Updating an existing installation
-
-**Run both. Either one alone leaves a gap.**
-
-```bash
-policygate init --upgrade                      # update the rules
-policygate install-hook --host claude --user   # update the registration
-policygate doctor                              # check both
-```
-
-Neither the configuration file nor the hook registration updates itself, and **whichever one is behind stays silent about it**, so running only one leaves nothing to notice.
-
-| Left un-updated | Consequence |
-| --- | --- |
-| Rules (`init --upgrade`) | New deny rules never apply, because a user configuration replaces a rule list wholesale |
-| Registration (`install-hook`) | A tool that became covered later — such as the `PowerShell` tool of Claude Code on Windows — **never reaches policygate at all** |
-
-This happened: a Windows machine with current rules and an older registration listed `~/.ssh` without a prompt. `policygate doctor` reports either shortfall.
-
-## Host behavior
-
-| PolicyApprovalGate decision | Claude Code | Codex CLI |
-| --- | --- | --- |
-| `deny` | Denies the command | Denies the command |
-| `ask` | Prompts the user | Standalone ask is unsupported, so `--host codex` converts it to deny |
-| No decision | Uses the normal approval flow | Uses the normal approval flow |
-
-When `--host` is omitted, PolicyApprovalGate safely treats the host as non-Claude and converts ask to deny. Always pass `--host claude` when registering the Claude Code hook.
-
-## Configuration
-
-See [internal/rules/default.yaml](internal/rules/default.yaml) for every built-in setting and default value.
-
-| Section | Purpose |
-| --- | --- |
-| `config_version` | Configuration schema version |
-| `mode` | `enforce` or audit-only `observe` |
-| `deny` | Reject complete commands matched with Go RE2 expressions |
-| `ask` | Prompt before specific commands in Claude Code and convert to deny in Codex (empty by default; add patterns such as git/gh write operations as needed) |
-| `allow` | Classify familiar low-risk commands without bypassing approval |
-| `protected_branches` | Control pushes to protected branches |
-| `path_scope` | Control read / write / delete outside the project |
-| `sensitive_paths` | Protect `.env`, SSH keys, credentials, and similar paths |
-| `protected_paths` | Always deny writes and deletes to gate configuration and hook registration |
-| `unknown` | `defer`, `ask`, or `deny` when no rule matches |
-| `parse_error` | `defer`, `ask`, or `deny` when shell syntax cannot be parsed |
-| `unknown.unanalyzed_action` / `parse_error.unanalyzed_action` | Replaces the above for a dialect with no structural analysis (PowerShell) |
-| `audit` | Configure path, command recording, and rotation |
-
-To require confirmation when PolicyApprovalGate cannot classify a command, set the fallback actions to `ask`:
-
-```yaml
-unknown:
-  action: ask
-
-parse_error:
-  action: ask
-```
-
-Claude Code prompts for these fallbacks. Codex does not support standalone `ask`, so PolicyApprovalGate converts the result to `deny`.
-
-Note how far that conversion reaches: under Codex, `unknown.action: ask` **rejects every command that matches no rule**, including ordinary work such as `go build ./...` or `npm run build`. If neither `--host` nor `POLICYGATE_HOST` identifies Claude, the result is the same because an unspecified host is safely treated as non-Claude. Treat an `ask` fallback as a Claude Code setting and identify the host with `--host claude` or `POLICYGATE_HOST=claude`. Both `policygate check-config` and `policygate doctor` detect the setting and print a warning.
-
-### Separate configuration files per host
-
-The configuration has no per-host settings. If you use both hosts and want them to behave differently — `ask` under Claude Code but `defer` under Codex, for example — point each hook registration at its own file with `--config`. The configuration is read on every hook call, so each host can carry an independent policy.
-
-`install-hook` writes the finished registration:
-
-```bash
-policygate install-hook --host claude --config /absolute/home/path/.policygate/claude.yaml
-policygate install-hook --host codex  --config /absolute/home/path/.policygate/codex.yaml
-```
-
-which registers a command of the form:
-
-```
-/absolute/path/policygate --host codex --config /absolute/home/path/.policygate/codex.yaml
-```
-
-> [!IMPORTANT]
-> **Do not use the `/usr/bin/env POLICYGATE_CONFIG=... policygate` form.** Windows has no `/usr/bin/env`, and Codex spawns the command directly, so **the hook fails to start — and Codex then runs the command without reporting it** (measured on Windows 11). The registration looks present and trusted while the gate is entirely inert. `--config` has no such failure mode.
-
-The `POLICYGATE_CONFIG` environment variable still works, but `--config` takes precedence over it. An environment variable applies to the whole process, which makes it a poor fit when only one host should be affected.
-
-Keep both files under the user's `.policygate` directory and retain the generated `.policygate` entry in enabled `protected_paths`, so writes and deletes to them are denied. **Give `--config` an absolute path.** `~` and `$HOME` are expanded only when the host runs the command through a shell, and an unexpanded value leaves the configuration file unreadable. If a policy must live elsewhere, add its path to `protected_paths.patterns` before registering the hook.
-
-The policy now lives in two files, so take care that shared parts such as deny rules stay in sync. Note also that an unreadable path makes enforce mode deny the Bash call, so validate each file with `policygate check-config --config <path>` before registering the hook.
-
-Allow rules classify familiar low-risk commands for audit metadata and never bypass host approval. Do not add command launchers such as `find -exec`, `xargs`, or `awk system()`; they produce misleading audit classifications even though they cannot bypass approval.
-
-If an explicitly selected configuration file is unreadable or invalid, enforce mode denies the Bash call instead of silently falling back to embedded defaults. Only `policygate observe` remains non-blocking for diagnostic use.
-
-## Path evaluation
-
-PolicyApprovalGate parses shell syntax with `mvdan.cc/sh` and classifies supported path arguments as read, write, or delete. It also accounts for:
-
-- An earlier `cd`, such as `cd /tmp && rm -rf target`
-- Existing symbolic links inside the project that point outside it
-- Links created earlier in the same chain, such as `ln -s /outside escape && ...`
-- Actual link placement for `ln -s SRC EXISTING_DIR` and `ln -s -t DIR SRC`
-- Destinations used by `cp -t DIR SRC` and `install --target-directory=DIR SRC`
-- Transparent wrappers such as `env`, `command`, and `nohup`
-- Quoted paths containing spaces
-- Indeterminate paths containing unresolved variables or `cd -`
-- A `cd` inside a pipeline, subshell, command substitution, background statement, or conditional branch, which leaves every later command without a known working directory
-- Commands in a `for` or `while` body that changes directory
-
-Only a `cd` in one of those positions makes anything indeterminate. A pipeline or branch with no `cd`, such as `cat a.txt | grep x > out.txt`, keeps its known working directory and is evaluated normally.
-
-Unsupported commands produce no path accesses and continue to other rules or `unknown.action`.
-
-### PowerShell
-
-On Windows a command may be written in PowerShell.
-
-- **Codex CLI on Windows** sends PowerShell while still reporting `tool_name` as `Bash`. The tool name is not a signal of the dialect.
-- **Claude Code on Windows** carries a `PowerShell` tool alongside its `Bash` one.
-
-PolicyApprovalGate determines the dialect from the host, the tool name, and the running platform. The result appears in `policygate doctor` and in the `dialect` field of the audit log, and `POLICYGATE_SHELL=posix|powershell` overrides it.
-
-**PowerShell shell syntax is not fully parsed**, which changes what applies:
-
-| | POSIX | PowerShell |
-| --- | --- | --- |
-| `deny` / `ask` / `allow` rules | Applied | Applied |
-| `sensitive_paths` | Applied | Applied, within the limits below |
-| `path_scope` (inside/outside the project) | Applied | Applied, within the limits below |
-| `protected_paths` | Applied | Applied, within the limits below |
-| `cd` tracking | Applied | **Not applied** (later relative paths become indeterminate) |
-| Symlink resolution | Applied | **Not applied** |
-
-PowerShell paths are recovered from a cmdlet and its parameters by tokenizing the command. `-Path`, `-LiteralPath`, `-Destination`, `-OutFile` and their abbreviations are honoured (`-l` reaches `-LiteralPath`), along with positional arguments, the aliases Windows PowerShell defines (`gc`, `ls`, `rm`, and the rest), and comma-separated arrays.
-
-These cannot be recovered. **A command whose paths cannot be pinned down is treated as indeterminate and follows `unanalyzed_action`.**
-
-- A target arriving through the pipeline (what `Get-ChildItem X | Remove-Item` deletes)
-- A path built from a variable or a subexpression (`Remove-Item $target`, `Join-Path`)
-- A relative path after `Set-Location`
-- Wildcards (`C:\temp\*` is treated as a literal path)
-- Backtick obfuscation and string concatenation
-
-A non-match therefore means different things in each dialect. Under POSIX it means the command was analyzed and no rule applied; under PowerShell it means the command was never understood. To keep the two apart, `unanalyzed_action` (default `ask`) replaces `action` for a dialect with no structural analysis.
-
-**Codex on Windows sends PowerShell for every command and converts ask to deny.** Left at the default it would reject ordinary work, so give Codex its own configuration file through `POLICYGATE_CONFIG` with `unanalyzed_action: defer`. Only the `deny` and `ask` text rules then apply there.
-
-```yaml
-unknown:
-  unanalyzed_action: defer
-parse_error:
-  unanalyzed_action: defer
-```
-
-### Case sensitivity
-
-Rule matching (`deny`, `ask`, `allow`, `sensitive_paths`, and `protected_paths`) **ignores case on every platform**.
-
-A filesystem that ignores case would otherwise let a different spelling walk past a rule. Windows NTFS and the default macOS APFS configuration both work this way, and so does Linux with ext4 casefold, an exFAT/NTFS mount, or a network share. On such a filesystem:
-
-- `.ENV` opens the same file as `.env`, so it slips past a rule written for `.env`
-- Command names are resolved the same way through `PATH`, so `RM -rf /` runs the same binary as `rm -rf /`
-
-On a genuinely case-sensitive filesystem this behavior can over-match: a distinct file or program whose name differs only by case is treated as a match. That is the direction a gate should fail in, which is why it applies everywhere.
-
-**Project containment is the one exception**: it follows the running platform's default filesystem behavior, so it can be imprecise on a non-standard configuration. See the limitations.
-
-## Audit log
-
-Decisions are written as JSON Lines to `~/.policygate/log/audit.log` by default. The newly created `log` directory uses mode `0700`, separating audit files from configuration and backups.
-
-- New log files use mode `0600`
-- Log directories created by PolicyApprovalGate use mode `0700`
-- Permissions of existing directories are left unchanged
-- Existing symlinks, FIFOs, devices, and other non-regular log paths are rejected
-- Final log files are opened without following symlinks
-- Rotation uses `max_bytes` and `max_files`
-- A cross-process lock serializes concurrent writes and rotation
-- `command_mode` supports `redacted`, `full`, `hash`, and `none`
-- `redacted` recognizes common token assignments, Authorization headers, URL userinfo, curl Basic-auth flags, and MySQL/MariaDB password flags
-
-Redaction is not exhaustive and may over-redact ordinary text. Use `hash` or `none` when command contents are unnecessary.
-
-## Operational commands
-
-| Command | Description | Example use |
-| --- | --- | --- |
-| `policygate install-hook --host claude` | Resolves its own absolute path and registers it as a PreToolUse hook. Idempotent, and preserves existing settings. | On installation, and after the binary moves |
-| `policygate uninstall-hook --host claude` | Removes the registration, leaving other hooks alone. | When disabling it temporarily, or uninstalling |
-| `policygate check-config` | Loads the configuration file and validates its schema and values, printing any warnings or errors. | After creating or editing a configuration, before registering the hook |
-| `policygate doctor` | Prints the version, OS/architecture, binary path, the paths self-protection covers, host, and configuration load status. | When diagnosing installation or configuration problems |
-| `policygate evaluate --host codex --command 'rm -rf /'` | Evaluates a command against the current policy **without executing it**, then prints the result as JSON. | When checking defer / ask / deny behavior after changing rules |
-| `policygate observe --host codex` | Reads one PreToolUse JSON input from standard input and records the evaluation without blocking it. | When testing hook integration without enforcement |
-| `policygate version` | Prints the PolicyApprovalGate version. | When checking the installed version |
-| `policygate help` | Prints the subcommands and environment variables. | When checking usage |
-
-Running with no arguments enters hook mode and reads standard input. An unknown subcommand or flag is reported with exit code 2 instead of being silently processed as a hook call.
-
-For example, use the following sequence after changing the configuration. The `rm -rf /` value passed to `evaluate` is only evaluated as text and is never executed.
+### 4. Verify the setup
 
 ```bash
 policygate check-config
 policygate doctor
 policygate evaluate --host codex --command 'rm -rf /'
-policygate version
 ```
 
-`observe` is a hook-oriented mode that expects PreToolUse JSON on standard input. Use `evaluate` for normal interactive checks.
+`evaluate` checks the string without executing the command.
+
+## How decisions work
+
+PolicyApprovalGate evaluates a command in this order:
+
+1. Deny rules
+2. Shell syntax parsing
+3. Pushes to protected branches
+4. Ask rules
+5. Path scope, sensitive paths, and protected paths
+6. Allow rules for audit classification
+7. `unknown.action` or `parse_error.action`
+
+An explicit deny always wins. Allow rules only classify audit records; they never bypass host approval. By default, operations that match no rule are delegated to the host's normal approval flow.
+
+### Host differences
+
+| PolicyApprovalGate decision | Claude Code | Codex CLI |
+| --- | --- | --- |
+| `deny` | Reject | Reject |
+| `ask` | Prompt the user | Convert to `deny` |
+| No decision | Use the normal approval flow | Use the normal approval flow |
+
+Codex PreToolUse hooks do not support a standalone `ask` decision, so `--host codex` converts it to `deny`. An omitted `--host` is also treated as non-Claude. Always pass `--host claude` when registering with Claude Code.
+
+## Configuration
+
+[internal/rules/default.yaml](internal/rules/default.yaml) contains every built-in setting and default value.
+
+| Section | Purpose |
+| --- | --- |
+| `config_version` | Configuration schema version |
+| `mode` | `enforce`, or `observe` to record without blocking |
+| `deny` | Reject commands matched by Go RE2 regular expressions |
+| `ask` | Prompt in Claude Code and reject in Codex |
+| `allow` | Classify familiar low-risk commands for audit metadata |
+| `protected_branches` | Control pushes to protected branches |
+| `path_scope` | Control read / write / delete outside the project |
+| `sensitive_paths` | Protect `.env`, SSH keys, credentials, and similar files |
+| `protected_paths` | Reject writes and deletes to configuration and hook files |
+| `unknown` | Action when no rule matches |
+| `parse_error` | Action when shell syntax cannot be parsed |
+| `audit` | Audit path, command recording, and rotation |
+
+`unknown.action` and `parse_error.action` accept `defer`, `ask`, or `deny`:
+
+```yaml
+unknown:
+  action: ask
+
+parse_error:
+  action: ask
+```
+
+This prompts under Claude Code but rejects under Codex. For example, `unknown.action: ask` under Codex also rejects ordinary build commands when they match no rule. `check-config` and `doctor` detect this combination and print a warning.
+
+### Separate configurations per host
+
+Register separate files when Claude Code and Codex need different behavior:
+
+```bash
+policygate install-hook --host claude --config /absolute/path/.policygate/claude.yaml
+policygate install-hook --host codex  --config /absolute/path/.policygate/codex.yaml
+```
+
+Pass an absolute path to `--config`. If an explicitly selected configuration cannot be loaded, enforce mode rejects the shell call. Validate each file before registering it:
+
+```bash
+policygate check-config --config /absolute/path/.policygate/codex.yaml
+```
+
+`POLICYGATE_CONFIG` remains available, but `--config` takes precedence. Use `--config` when assigning a different policy to each hook.
+
+> [!WARNING]
+> Do not use `/usr/bin/env POLICYGATE_CONFIG=... policygate` on Windows. Windows has no `/usr/bin/env`, so the hook cannot start, and a failed hook does not stop the tool call. In a Codex CLI 0.147.0 test on Windows 11, the command ran without any PolicyApprovalGate audit record. `install-hook --config` starts PolicyApprovalGate directly and avoids this failure.
+
+Keep policy files under `.policygate` when possible so the built-in `protected_paths` rules cover them. If a policy must live elsewhere, add that path to `protected_paths.patterns`.
+
+### Upgrade an existing configuration
+
+Policy files and hook registrations do not update themselves. Refresh both after upgrading PolicyApprovalGate:
+
+```bash
+policygate init --upgrade
+policygate install-hook --host claude   # include --user if that is how it was registered
+policygate doctor
+```
+
+`init --upgrade` writes a `config.yaml.bak.*` backup beside the existing file, then replaces it atomically.
+
+User-defined `deny`, `ask`, `allow`, `sensitive_paths.patterns`, and `protected_paths.patterns` lists replace the built-in lists instead of extending them automatically. `--upgrade` restores missing built-in rules and reports each addition as a warning. Review those warnings because a rule removed on purpose may be restored.
+
+## Path evaluation
+
+For POSIX shells, PolicyApprovalGate parses syntax with `mvdan.cc/sh` and classifies supported arguments as read, write, or delete. It handles cases including:
+
+- An earlier `cd`, such as `cd /tmp && rm -rf target`
+- Existing symlinks inside the project that point outside it
+- Symlinks created earlier in the same chain, such as `ln -s /outside escape && ...`
+- Link placement for `ln -s SRC EXISTING_DIR` and `ln -s -t DIR SRC`
+- Destinations used by `cp -t DIR SRC` and `install --target-directory=DIR SRC`
+- Transparent wrappers such as `env`, `command`, and `nohup`
+- Quoted paths containing spaces
+- A `cd` inside a pipeline, subshell, conditional, background command, or loop
+
+Paths that depend on unresolved variables, `cd -`, or similar runtime state are treated as indeterminate and evaluated conservatively. Unsupported commands produce no path accesses and continue to other rules or `unknown.action`.
+
+### Case sensitivity
+
+Rule matching for `deny`, `ask`, `allow`, `sensitive_paths`, and `protected_paths` ignores case on every platform. This prevents spellings such as `.ENV` or `RM` from bypassing rules on the default macOS and Windows filesystems.
+
+On a genuinely case-sensitive filesystem, this can over-match a distinct file or program whose name differs only by case. Project containment is the exception: it follows the running platform's default filesystem behavior.
+
+## Windows and PowerShell
+
+The hosts expose PowerShell differently on Windows:
+
+- Codex CLI sends PowerShell commands while reporting `tool_name: "Bash"`
+- Claude Code has a `PowerShell` tool, so registration covers both `Bash` and `PowerShell`
+
+PolicyApprovalGate determines the dialect from the host, tool name, and OS. The result appears in `doctor` and in the audit log's `dialect` field. Set `POLICYGATE_SHELL=posix|powershell` to override detection.
+
+PowerShell support tokenizes cmdlets and parameters to recover paths; it is not a complete parser.
+
+| Capability | POSIX | PowerShell |
+| --- | --- | --- |
+| `deny` / `ask` / `allow` | Supported | Supported |
+| `path_scope` / `sensitive_paths` / `protected_paths` | Supported | Supported for recovered paths |
+| `cd` tracking | Supported | Not supported; later relative paths become indeterminate |
+| Symlink resolution | Supported | Not supported |
+
+The PowerShell classifier handles `-Path`, `-LiteralPath`, `-Destination`, positional arguments, common aliases, and comma-separated arrays. It cannot reliably determine:
+
+- A target arriving through a pipeline
+- A path built from variables, subexpressions, or string concatenation
+- A relative path after `Set-Location`
+- The paths produced by wildcard expansion
+- Backtick-obfuscated input
+
+Operations it cannot recover follow `unknown.unanalyzed_action` or `parse_error.unanalyzed_action`, both of which default to `ask`.
+
+Because Codex on Windows converts `ask` to `deny`, the defaults may reject ordinary work. If needed, give Codex its own policy and change the fallback:
+
+```yaml
+unknown:
+  unanalyzed_action: defer
+parse_error:
+  unanalyzed_action: defer
+```
+
+Text rules and path policies for paths that the PowerShell tokenizer can recover still apply with this setting.
+
+## Audit log
+
+Decisions are written as JSON Lines to `~/.policygate/log/audit.log` by default.
+
+- New directories use mode `0700`; new log files use `0600`
+- Permissions of existing directories are left unchanged
+- Existing symlinks, FIFOs, devices, and other non-regular files are rejected
+- The final log file is opened without following symlinks
+- A cross-process lock serializes concurrent writes and rotation
+- `max_bytes` and `max_files` control rotation
+- `command_mode` supports `redacted`, `full`, `hash`, and `none`
+
+`redacted` recognizes common token assignments, Authorization headers, URL userinfo, curl Basic-auth flags, and MySQL / MariaDB password flags. Redaction is not exhaustive and can also hide ordinary text. Use `hash` or `none` when command contents are unnecessary.
+
+## CLI reference
+
+| Command | Purpose |
+| --- | --- |
+| `policygate install-hook --host claude|codex` | Register a PreToolUse hook |
+| `policygate uninstall-hook --host claude|codex` | Remove only the PolicyApprovalGate registration |
+| `policygate check-config` | Validate the configuration schema and values |
+| `policygate doctor` | Diagnose version, OS, configuration, registration, dialect, and self-protection |
+| `policygate evaluate --command CMD` | Evaluate a command without executing it |
+| `policygate observe` | Record decisions without blocking |
+| `policygate version` | Print the version |
+| `policygate help` | Print help |
+
+Hook registration supports these flags:
+
+| Flag | Applies to | Purpose |
+| --- | --- | --- |
+| `--user` | Install and uninstall | Target Claude Code's user settings |
+| `--path PATH` | Install and uninstall | Select the registration file |
+| `--config PATH` | Install | Add an absolute policy path to the registered command |
+| `--dry-run` | Install and uninstall | Print the result without changing the file |
+
+Complete manual examples are available for [Claude Code](configs/claude-code.settings.example.json) and [Codex](configs/codex-config.example.toml). Write Windows paths with forward slashes, as in `D:/bin/policygate.exe`.
+
+Running without arguments enters hook mode and reads one PreToolUse JSON payload from standard input. Unknown subcommands and flags exit with code 2.
 
 ## Limitations
 
-- Bash tool calls and the `PowerShell` tool calls of Claude Code on Windows are covered. Other tools and direct file edits are not inspected.
-- PowerShell shell syntax is not fully parsed. Paths are recovered from a cmdlet and its parameters, but a target arriving through the pipeline, a path built from a variable, and a relative path after `Set-Location` cannot be; `cd` tracking and symlink resolution do not apply. A command whose paths cannot be pinned down follows `unanalyzed_action` (default `ask`). See "PowerShell" for the details.
-- An `ask` decision prompts for confirmation in Claude Code but is converted to `deny` in Codex, which does not support standalone confirmation from a PreToolUse hook. The same policy can therefore produce a prompt on Claude Code and a rejected command on Codex.
-- Regex and bounded shell analysis cannot fully handle obfuscation or unsupported syntax.
-- Deciding whether a path lies inside the project follows the running platform's default filesystem behavior. On a case-sensitive macOS volume, a separate directory differing only by case may be treated as inside the project; on a case-insensitive Linux mount, a path inside the project may be treated as outside it. Rule matching itself is unaffected by the former.
-- Git aliases are not resolved, so a push hidden behind one such as `git pushf` passes the protected-branch check. Resolving an alias requires reading `git config`, and an alias can itself be an arbitrary shell command (`!sh -c ...`). Pair this with branch protection on the remote when the rule must hold.
-- A command name produced by a variable or command substitution, such as `$CMD -rf /`, cannot be resolved during analysis.
-- Pipelines, subshells, and conditionals are not fully executed semantically; related commands are treated as indeterminate and evaluated conservatively.
-- A normal directory created earlier in the same chain does not exist at analysis time, so a later `cd` may be treated as failed.
-- Unknown commands and shell syntax that cannot be parsed follow `unknown.action` and `parse_error.action`; both default to `defer` and can be changed to `ask` or `deny`. As with other `ask` decisions, Claude Code prompts for confirmation and Codex converts the decision to `deny`.
-- An invalid explicit policy configuration returns `deny` for a valid Bash hook call. Hook input, decision-output, and audit-log failures are reported to standard error, but cannot always produce or replace the host decision.
+- Only shell commands are inspected. Direct file edits and other tools are outside its scope.
+- Regex rules and bounded structural analysis cannot fully handle obfuscation or unsupported syntax.
+- PowerShell pipelines, variables, and relative paths after `Set-Location` cannot be tracked completely.
+- Git aliases are not resolved. Use remote branch protection when the rule must be enforced.
+- Command names produced through variable expansion or command substitution cannot be resolved statically.
+- Pipelines, subshells, and conditionals are not modeled with complete execution semantics.
+- A normal directory created earlier in the same chain does not exist during analysis, so a later `cd` may be treated as failed.
+- An invalid explicit policy returns deny, but hook-input, decision-output, or audit-log failures cannot always replace the host decision.
 - The bundled rules are a starting point and should be adapted to your environment.
 
 ## Development
 
 ```bash
 gofmt -w .
+go mod tidy -diff
 go vet ./...
 go test -race ./...
 golangci-lint run ./...
@@ -364,9 +306,9 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 go build ./...
 ```
 
-Lint settings are pinned in [.golangci.yml](.golangci.yml). See [.github/workflows/ci.yml](.github/workflows/ci.yml) for the CI configuration; GitHub Actions are pinned to a commit SHA rather than a tag.
+Lint configuration is in [.golangci.yml](.golangci.yml), and CI is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml). GitHub Actions are pinned to commit SHAs rather than tags.
 
-Pushing a `v*` tag runs [.github/workflows/release.yml](.github/workflows/release.yml), which builds darwin, linux, and windows binaries for amd64 and arm64, generates `SHA256SUMS`, and publishes them as a pre-release.
+Pushing a `v*` tag runs the [release workflow](.github/workflows/release.yml), which builds amd64 and arm64 binaries for darwin, linux, and windows, generates `SHA256SUMS`, and publishes a pre-release.
 
 See [SECURITY.md](SECURITY.md) for private vulnerability-reporting instructions.
 
