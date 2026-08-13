@@ -92,6 +92,9 @@ func runCheckConfig(args []string) int {
 	if warning := unanalyzedAskWarning(cfg); warning != "" {
 		fmt.Printf("warning: %s\n", warning)
 	}
+	if warning := staleRulesWarning(cfg); warning != "" {
+		fmt.Printf("warning: %s\n", warning)
+	}
 	fmt.Printf("ok: %s (schema v%d, mode %s)\n", *path, cfg.Version, cfg.Mode)
 	return 0
 }
@@ -116,6 +119,27 @@ func fallbackAskWarning(cfg *rules.Config) string {
 	}
 	return fmt.Sprintf("%s: ask is preserved only when the resolved host is Claude (--host claude or POLICYGATE_HOST=claude); every other host converts it to deny and rejects each command that reaches the fallback",
 		strings.Join(sections, " and "))
+}
+
+// staleRulesWarning reports built-in rules the configuration no longer carries.
+//
+// A user configuration replaces a rule list wholesale, so one written before a
+// release never receives the rules that release added. Nothing else says so:
+// the gate loads, reports no error, and enforces less than the documentation
+// describes. Silence there is the failure this whole project exists to avoid.
+func staleRulesWarning(cfg *rules.Config) string {
+	missing, err := cfg.MissingDefaultRules()
+	if err != nil || len(missing) == 0 {
+		return ""
+	}
+	sections := make([]string, 0, len(missing))
+	for _, name := range []string{"deny", "sensitive_paths.patterns", "protected_paths.patterns"} {
+		if count, ok := missing[name]; ok {
+			sections = append(sections, fmt.Sprintf("%s (%d)", name, count))
+		}
+	}
+	return fmt.Sprintf("this configuration is missing built-in rules added since it was written: %s; run `policygate init --upgrade` to merge them, then review the warnings it prints",
+		strings.Join(sections, ", "))
 }
 
 // unanalyzedAskWarning reports the shipped default, which is safe on Claude
@@ -162,6 +186,9 @@ func runDoctor(args []string) int {
 			fmt.Printf("config warning: %s\n", warning)
 		}
 		if warning := unanalyzedAskWarning(cfg); warning != "" {
+			fmt.Printf("config warning: %s\n", warning)
+		}
+		if warning := staleRulesWarning(cfg); warning != "" {
 			fmt.Printf("config warning: %s\n", warning)
 		}
 	}

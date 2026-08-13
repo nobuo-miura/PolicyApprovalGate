@@ -237,6 +237,47 @@ func Upgrade(data []byte) ([]byte, []string, error) {
 // than merging into it, so without this an upgrade would never deliver rules
 // added to a later release. Rules are matched by pattern, and a restored rule
 // can simply be deleted again after the upgrade.
+// MissingDefaultRules counts the built-in rules a configuration no longer
+// carries, per section.
+//
+// A user configuration replaces a rule list wholesale, so a file written before
+// a release simply does not have the rules that release added, and nothing says
+// so: the gate runs, reports no error, and quietly enforces less than the
+// documentation describes. Someone whose configuration predates the PowerShell
+// rules is not protected by them until they upgrade, and would have no way to
+// find that out.
+func (c *Config) MissingDefaultRules() (map[string]int, error) {
+	defaults, err := Default()
+	if err != nil {
+		return nil, fmt.Errorf("load embedded defaults: %w", err)
+	}
+	missing := map[string]int{}
+	for _, section := range []struct {
+		name    string
+		have    []Rule
+		builtin []Rule
+	}{
+		{"deny", c.Deny, defaults.Deny},
+		{"sensitive_paths.patterns", c.SensitivePaths.Patterns, defaults.SensitivePaths.Patterns},
+		{"protected_paths.patterns", c.ProtectedPaths.Patterns, defaults.ProtectedPaths.Patterns},
+	} {
+		present := make(map[string]bool, len(section.have))
+		for _, rule := range section.have {
+			present[rule.Pattern] = true
+		}
+		count := 0
+		for _, rule := range section.builtin {
+			if !present[rule.Pattern] {
+				count++
+			}
+		}
+		if count > 0 {
+			missing[section.name] = count
+		}
+	}
+	return missing, nil
+}
+
 func (c *Config) restoreMissingDefaultRules() ([]string, error) {
 	defaults, err := Default()
 	if err != nil {

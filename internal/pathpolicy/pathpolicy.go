@@ -131,6 +131,10 @@ func Classify(cmd shellparse.Command) []Access {
 		switch {
 		case r.Target == "":
 			continue
+		case duplicatesDescriptor(r.Op, r.Target):
+			// 2>&1 names a file descriptor, not a file. Reading it as one
+			// reports a write to a file called "1", which every `go build
+			// ./... 2>&1` then has to be approved for.
 		case r.Op == "<":
 			out = append(out, newAccess(r.Target, OpRead))
 		case r.Op == "<<" || r.Op == "<<-" || r.Op == "<<<":
@@ -140,7 +144,58 @@ func Classify(cmd shellparse.Command) []Access {
 		}
 	}
 
-	return out
+	return withoutPseudoDevices(out)
+}
+
+// duplicatesDescriptor reports whether a redirection copies a file descriptor
+// rather than opening a file.
+//
+// Only a numeric operand, or the `-` that closes a descriptor, is a duplication:
+// bash reads `ls >&out.log` as a redirection to the file out.log, so the
+// operand has to be inspected rather than the operator alone.
+func duplicatesDescriptor(op, target string) bool {
+	if op != ">&" && op != "<&" {
+		return false
+	}
+	if target == "-" {
+		return true
+	}
+	for _, r := range target {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return target != ""
+}
+
+// harmlessDevices are the pseudo-devices that discard, generate, or name an
+// already-open stream. Opening one touches no file, so a policy question about
+// where it sits does not arise.
+//
+// Real devices are deliberately absent: /dev/sda and its kin are covered by
+// deny rules matched against the command text, and exempting all of /dev would
+// take those out along with the harmless ones.
+var harmlessDevices = map[string]bool{
+	"/dev/null": true, "/dev/zero": true, "/dev/full": true,
+	"/dev/random": true, "/dev/urandom": true,
+	"/dev/stdin": true, "/dev/stdout": true, "/dev/stderr": true,
+	"/dev/tty": true,
+}
+
+// withoutPseudoDevices drops accesses to those devices.
+//
+// Without this, `2>/dev/null` reads as a write outside the project and asks for
+// approval - on a command as ordinary as `ls foo 2>/dev/null`. A gate that
+// interrupts that often is one people turn off.
+func withoutPseudoDevices(accesses []Access) []Access {
+	kept := accesses[:0]
+	for _, access := range accesses {
+		if harmlessDevices[access.Path] || strings.HasPrefix(access.Path, "/dev/fd/") {
+			continue
+		}
+		kept = append(kept, access)
+	}
+	return kept
 }
 
 // classifyCopyLike classifies sources and destinations for copy-like commands.

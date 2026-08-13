@@ -574,3 +574,45 @@ func TestPowerShellDenyRulesLeaveOrdinaryWorkAlone(t *testing.T) {
 		}
 	}
 }
+
+// A user configuration replaces a rule list wholesale, so one written before a
+// release never receives the rules that release added - and nothing else says
+// so. Reported from a Windows machine whose configuration predated the
+// PowerShell rules: the gate loaded cleanly and enforced none of them.
+func TestMissingDefaultRulesReportsWhatAConfigurationLacks(t *testing.T) {
+	// A configuration naming one deny rule keeps only that one.
+	cfg, err := Parse([]byte("deny:\n  - pattern: 'only-this'\n    reason: x\naudit:\n  enabled: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := cfg.MissingDefaultRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing["deny"] != len(defaults.Deny) {
+		t.Errorf("missing[deny] = %d, want all %d built-in rules", missing["deny"], len(defaults.Deny))
+	}
+	// Sections the configuration left out entirely inherit the defaults, so
+	// nothing is missing from them.
+	if count, ok := missing["sensitive_paths.patterns"]; ok {
+		t.Errorf("sensitive_paths reported %d missing, want none: it was never overridden", count)
+	}
+}
+
+func TestMissingDefaultRulesIsSilentForACurrentConfiguration(t *testing.T) {
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := cfg.MissingDefaultRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Errorf("the built-in defaults reported missing rules: %v", missing)
+	}
+}
