@@ -442,11 +442,33 @@ func withoutPolicygateHooks(groups []json.RawMessage, programNames []string) ([]
 // withPolicygateHook appends the hook to an existing Bash matcher group when
 // there is one, so a user who already registered other Bash hooks keeps a
 // single group.
+// claudeMatchers are the tools that carry a shell command to evaluate.
+//
+// PowerShell is listed separately rather than as an alternation such as
+// "Bash|PowerShell". A matcher that turns out to be compared literally rather
+// than as a regular expression would then match neither tool and disable the
+// hook outright, which is the one failure this must not risk. Two plain names
+// work under either reading.
+var claudeMatchers = []string{"Bash", "PowerShell"}
+
 func withPolicygateHook(groups []json.RawMessage, command string) ([]json.RawMessage, error) {
 	entry := claudeHookEntry{Type: "command", Command: command}
+	for _, matcher := range claudeMatchers {
+		var err error
+		if groups, err = withMatcherGroup(groups, matcher, entry); err != nil {
+			return nil, err
+		}
+	}
+	return groups, nil
+}
+
+// withMatcherGroup appends the hook to an existing group for matcher when there
+// is one, so a user who already registered other hooks for that tool keeps a
+// single group.
+func withMatcherGroup(groups []json.RawMessage, matcher string, entry claudeHookEntry) ([]json.RawMessage, error) {
 	for i, raw := range groups {
 		var group claudeMatcherGroup
-		if err := json.Unmarshal(raw, &group); err != nil || group.Matcher != "Bash" {
+		if err := json.Unmarshal(raw, &group); err != nil || group.Matcher != matcher {
 			continue
 		}
 		group.Hooks = append(group.Hooks, entry)
@@ -457,7 +479,7 @@ func withPolicygateHook(groups []json.RawMessage, command string) ([]json.RawMes
 		groups[i] = encoded
 		return groups, nil
 	}
-	encoded, err := json.Marshal(claudeMatcherGroup{Matcher: "Bash", Hooks: []claudeHookEntry{entry}})
+	encoded, err := json.Marshal(claudeMatcherGroup{Matcher: matcher, Hooks: []claudeHookEntry{entry}})
 	if err != nil {
 		return nil, err
 	}

@@ -10,10 +10,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/nobuo-miura/policyapprovalgate/internal/audit"
+	"github.com/nobuo-miura/policyapprovalgate/internal/dialect"
 	"github.com/nobuo-miura/policyapprovalgate/internal/gitpush"
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
 	"github.com/nobuo-miura/policyapprovalgate/internal/pathpolicy"
@@ -65,7 +67,7 @@ Usage:
                                              Remove the registration
   policygate check-config [--config PATH]    Validate a configuration file
   policygate doctor                          Print version, host, and configuration status
-  policygate evaluate --command CMD [--cwd DIR] [--host claude|codex]
+  policygate evaluate --command CMD [--cwd DIR] [--host claude|codex] [--tool NAME]
                                              Evaluate a command without executing it
   policygate version                         Print the version
   policygate help                            Print this message
@@ -73,6 +75,7 @@ Usage:
 Environment:
   POLICYGATE_CONFIG  Configuration file path (default ~/.policygate/config.yaml)
   POLICYGATE_HOST    Host behavior applied when --host is omitted
+  POLICYGATE_SHELL   Shell dialect (posix or powershell); overrides detection
 `)
 }
 
@@ -186,10 +189,12 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 	}
 
 	cmd := strings.TrimSpace(in.ToolInput.Command)
-	if in.ToolName != "Bash" || cmd == "" {
+	if !carriesShellCommand(in.ToolName) || cmd == "" {
 		return 0
 	}
 	in.CWD = resolveCWD(in.CWD)
+	shell := resolveDialect(host, in.ToolName)
+	warnOnDialectMismatch(shell, cmd)
 	if configErr != nil {
 		reason := "policy configuration could not be loaded: " + configErr.Error()
 		warnf("%s", reason)
@@ -201,7 +206,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 		return 0
 	}
 
-	decision, reason, source, matchedBy := evaluate(cfg, in, cmd)
+	decision, reason, source, matchedBy := evaluate(cfg, in, cmd, shell)
 	decision, reason = finalizeForHost(host, decision, reason)
 	predictedDecision := decision
 	observe := observeOverride || cfg.Mode == "observe"
@@ -224,6 +229,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 			Decision:  string(predictedDecision),
 			Reason:    reason,
 			MatchedBy: matchedBy,
+			Dialect:   string(shell),
 		}
 		if observe {
 			rec.Source = "observe:" + rec.Source
@@ -238,7 +244,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 
 // evaluate returns the host decision and audit metadata. Explicit denials take
 // priority and unmatched commands delegate to host approval.
-func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decision, reason, source, matchedBy string) {
+func evaluate(cfg *rules.Config, in hook.Input, cmd string, shell dialect.Dialect) (decision hook.Decision, reason, source, matchedBy string) {
 	// Match the whole command with quoted and escaped text masked out, so a
 	// separator inside an argument cannot pose as the start of a command.
 	if r := cfg.MatchDeny(maskQuotedText(cmd)); r != nil {
@@ -249,7 +255,7 @@ func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decis
 	if parseErr != nil {
 		// Do not guess when invalid syntax prevents structural analysis.
 		warnf("parse command for analysis: %v", parseErr)
-		d, r := actionDecision(cfg.ParseError, "could not analyze command structure: "+parseErr.Error())
+		d, r := actionDecision(cfg.ParseError, shell, "could not analyze command structure: "+parseErr.Error())
 		return d, r, "parse_error", ""
 	}
 
@@ -290,7 +296,7 @@ func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decis
 		}
 	}
 
-	if d, r, src, matched := strictestPathAccess(cfg, subcmds, in.CWD, nested); d != "" {
+	if d, r, src, matched := strictestPathAccess(cfg, subcmds, cmd, in.CWD, nested, shell); d != "" {
 		switch d {
 		case "deny":
 			return hook.DecisionDeny, r, src, matched
@@ -312,7 +318,7 @@ func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decis
 	}
 
 	// Delegate to the configured unknown-command fallback.
-	d, r := actionDecision(cfg.Unknown, "no rule matched")
+	d, r := actionDecision(cfg.Unknown, shell, unmatchedReason(shell))
 	return d, r, "unknown", ""
 }
 
@@ -456,16 +462,22 @@ func parseNestedScript(cmd shellparse.Command) ([]shellparse.Command, bool) {
 
 // strictestPathAccess returns the strictest path decision across the command
 // itself and every literal script it reaches.
-func strictestPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string, nested []nestedScriptGroup) (decision, reason, source, matchedBy string) {
+func strictestPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cmd, cwd string, nested []nestedScriptGroup, shell dialect.Dialect) (decision, reason, source, matchedBy string) {
+	home := paths.Home()
+	if shell == dialect.PowerShell {
+		// The nested groups are POSIX constructs, recovered from a literal
+		// sh -c; there is nothing equivalent to walk into here.
+		return checkPathAccess(cfg, powerShellAccesses(cmd, cwd), cwd)
+	}
 	best := 0
 	consider := func(d, r, s, m string) {
 		if rank := decisionRank(d); rank > best {
 			best, decision, reason, source, matchedBy = rank, d, r, s, m
 		}
 	}
-	consider(checkPathAccess(cfg, subcmds, cwd))
+	consider(checkPathAccess(cfg, posixAccesses(subcmds, cwd, home), cwd))
 	for _, group := range nested {
-		consider(checkPathAccess(cfg, group.commands, group.cwd))
+		consider(checkPathAccess(cfg, posixAccesses(group.commands, group.cwd, home), group.cwd))
 	}
 	return decision, reason, source, matchedBy
 }
@@ -625,8 +637,17 @@ func literalNestedShellScript(name string, argv []string) (string, bool) {
 }
 
 // actionDecision maps a configured fallback action to a host decision.
-func actionDecision(a rules.ActionConfig, reason string) (hook.Decision, string) {
-	switch a.Action {
+// unmatchedReason says why nothing matched, because the two cases mean opposite
+// things and the user reading the prompt has to be able to tell them apart.
+func unmatchedReason(shell dialect.Dialect) string {
+	if shell.Analyzable() {
+		return "no rule matched"
+	}
+	return fmt.Sprintf("no rule matched, and %s commands are matched as text only: policygate could not examine this one", shell)
+}
+
+func actionDecision(a rules.ActionConfig, shell dialect.Dialect, reason string) (hook.Decision, string) {
+	switch a.For(shell.Analyzable()) {
 	case "ask":
 		return hook.DecisionAsk, reason
 	case "deny":
@@ -669,10 +690,52 @@ func checkProtectedBranches(cfg *rules.Config, subcmds []shellparse.Command, cwd
 	return gitpush.Verdict{}
 }
 
+// trackedAccess is one path access together with what is known about the
+// working directory it is resolved against.
+type trackedAccess struct {
+	access pathpolicy.Access
+	state  pathpolicy.CWDState
+	links  []pathpolicy.Symlink
+}
+
+// trackedAccesses collects the path accesses of a command in whichever dialect
+// it is written.
+//
+// The POSIX path is the parsed one, with the working directory followed through
+// the chain and symbolic links resolved. PowerShell has no parse to work from,
+// so its accesses come from ClassifyPowerShell and carry only the working
+// directory the hook reported: a cd there is reported by marking the paths that
+// follow it indeterminate rather than by computing where it landed.
+func posixAccesses(subcmds []shellparse.Command, cwd, home string) []trackedAccess {
+	cwdStates, linksBefore := pathpolicy.TrackCWD(subcmds, cwd, home)
+	var out []trackedAccess
+	for i, sc := range subcmds {
+		for _, acc := range pathpolicy.Classify(sc) {
+			out = append(out, trackedAccess{access: acc, state: cwdStates[i], links: linksBefore[i]})
+		}
+	}
+	return out
+}
+
+// powerShellAccesses reads the paths straight out of the command text.
+//
+// There is no parse to follow the working directory through, so every access
+// resolves against the directory the hook reported. ClassifyPowerShell reports
+// a directory change by marking the relative paths after it indeterminate,
+// which is the honest answer: the analysis cannot say where they landed.
+func powerShellAccesses(cmd, cwd string) []trackedAccess {
+	state := pathpolicy.CWDState{Path: cwd}
+	var out []trackedAccess
+	for _, acc := range pathpolicy.ClassifyPowerShell(cmd) {
+		out = append(out, trackedAccess{access: acc, state: state})
+	}
+	return out
+}
+
 // checkPathAccess returns the strictest path-scope, sensitive-path, or
 // protected-path result across all simple commands. It tracks CWD changes and
 // both existing and pending symbolic links.
-func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string) (decision, reason, source, matchedBy string) {
+func checkPathAccess(cfg *rules.Config, accesses []trackedAccess, cwd string) (decision, reason, source, matchedBy string) {
 	// Self-protection is structural and has no configuration to disable, so it
 	// keeps this function alive even when every configured path check is off.
 	self := selfPaths()
@@ -692,13 +755,10 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 		rootLabel = "outside the project root, which could not be determined"
 	}
 
-	cwdStates, linksBefore := pathpolicy.TrackCWD(subcmds, cwd, home)
-
 	best := 0 // 0 none, 1 ask, 2 deny
-	for i, sc := range subcmds {
-		state := cwdStates[i]
-		links := linksBefore[i]
-		for _, acc := range pathpolicy.Classify(sc) {
+	for _, tracked := range accesses {
+		acc, state, links := tracked.access, tracked.state, tracked.links
+		{
 			indeterminate := acc.Indeterminate || state.Indeterminate
 
 			// Always resolved: self-protection needs the candidates even when
@@ -829,6 +889,54 @@ func auditPath(cfg *rules.Config) string {
 		p = paths.DefaultAuditLog
 	}
 	return paths.Expand(p)
+}
+
+// resolveDialect reports the shell language a payload carries, honouring an
+// explicit POLICYGATE_SHELL over the host contract.
+//
+// The override exists because the contract is measured behaviour, not a
+// promise: it has to be correctable in the field without waiting for a release.
+func resolveDialect(host, toolName string) dialect.Dialect {
+	if v := os.Getenv(dialect.EnvShell); v != "" {
+		if d, err := dialect.Parse(v); err == nil {
+			return d
+		} else {
+			warnf("%s: %v (falling back to detection)", dialect.EnvShell, err)
+		}
+	}
+	return dialect.Detect(host, toolName, runtime.GOOS)
+}
+
+// carriesShellCommand reports whether a tool hands policygate a shell command
+// to evaluate.
+//
+// Claude Code on Windows carries commands through a PowerShell tool as well as
+// a Bash one, and measuring a session found 12 PowerShell calls against 10 Bash
+// ones with none of the PowerShell reaching the audit log: matching only "Bash"
+// left more than half the commands unexamined. Anything else - a file edit, a
+// web fetch - carries no command and is not this hook's business.
+func carriesShellCommand(toolName string) bool {
+	switch strings.ToLower(toolName) {
+	case "bash", "powershell":
+		return true
+	}
+	return false
+}
+
+// warnOnDialectMismatch reports text that reads as PowerShell where the host
+// contract says POSIX.
+//
+// The text is never allowed to decide - it can be shaped at will, and letting
+// it choose would hand an attacker the analysis it prefers to face. But a host
+// that quietly changes what it sends would otherwise leave PowerShell being
+// read as POSIX with nothing to show for it, so the disagreement is surfaced.
+func warnOnDialectMismatch(shell dialect.Dialect, cmd string) {
+	if shell != dialect.POSIX {
+		return
+	}
+	if dialect.LooksLikePowerShell(maskQuotedText(cmd)) {
+		warnf("command reads as PowerShell but the host contract says posix; set %s=powershell if this host has changed", dialect.EnvShell)
+	}
 }
 
 // resolveHost uses --host before POLICYGATE_HOST and never infers a host from payload data.

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/nobuo-miura/policyapprovalgate/internal/dialect"
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
 	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
 )
@@ -21,6 +22,9 @@ type evaluationOutput struct {
 	Reason    string        `json:"reason"`
 	Source    string        `json:"source"`
 	MatchedBy string        `json:"matched_by,omitempty"`
+	// Dialect names the analysis that ran, so a result can be read knowing
+	// whether the command was structurally examined or only matched as text.
+	Dialect string `json:"dialect,omitempty"`
 }
 
 func runEvaluate(args []string) int {
@@ -29,6 +33,7 @@ func runEvaluate(args []string) int {
 	command := fs.String("command", "", "shell command to evaluate")
 	cwd := fs.String("cwd", "", "working directory used for path checks")
 	host := fs.String("host", "codex", "host behavior to apply (codex or claude)")
+	tool := fs.String("tool", "Bash", "tool name the host would report, which affects dialect detection")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -49,10 +54,13 @@ func runEvaluate(args []string) int {
 		fmt.Fprintf(os.Stderr, "policygate evaluate: %v\n", err)
 		return 1
 	}
-	in := hook.Input{ToolName: "Bash", CWD: *cwd, ToolInput: hook.ToolInput{Command: *command}}
-	decision, reason, source, matchedBy := evaluate(cfg, in, *command)
+	in := hook.Input{ToolName: *tool, CWD: *cwd, ToolInput: hook.ToolInput{Command: *command}}
+	shell := resolveDialect(*host, *tool)
+	warnOnDialectMismatch(shell, *command)
+	decision, reason, source, matchedBy := evaluate(cfg, in, *command, shell)
 	decision, reason = finalizeForHost(*host, decision, reason)
-	if err := json.NewEncoder(os.Stdout).Encode(evaluationOutput{decision, reason, source, matchedBy}); err != nil {
+	out := evaluationOutput{decision, reason, source, matchedBy, string(shell)}
+	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		fmt.Fprintf(os.Stderr, "policygate evaluate: encode result: %v\n", err)
 		return 1
 	}
@@ -81,6 +89,9 @@ func runCheckConfig(args []string) int {
 	if warning := fallbackAskWarning(cfg); warning != "" {
 		fmt.Printf("warning: %s\n", warning)
 	}
+	if warning := unanalyzedAskWarning(cfg); warning != "" {
+		fmt.Printf("warning: %s\n", warning)
+	}
 	fmt.Printf("ok: %s (schema v%d, mode %s)\n", *path, cfg.Version, cfg.Mode)
 	return 0
 }
@@ -107,6 +118,28 @@ func fallbackAskWarning(cfg *rules.Config) string {
 		strings.Join(sections, " and "))
 }
 
+// unanalyzedAskWarning reports the shipped default, which is safe on Claude
+// Code and unusable on Codex under Windows.
+//
+// Both are legitimate settings, so this describes the consequence rather than
+// prescribing a value. It stays host-neutral for the same reason
+// fallbackAskWarning does: neither check-config nor doctor accepts --host, so
+// neither can tell which host the registered hook runs under.
+func unanalyzedAskWarning(cfg *rules.Config) string {
+	var sections []string
+	if cfg.Unknown.UnanalyzedAction == "ask" {
+		sections = append(sections, "unknown.unanalyzed_action")
+	}
+	if cfg.ParseError.UnanalyzedAction == "ask" {
+		sections = append(sections, "parse_error.unanalyzed_action")
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s: Codex sends PowerShell for every command on Windows and converts ask to deny, which would reject ordinary work there; give Codex its own file through POLICYGATE_CONFIG with unanalyzed_action: defer, understanding that PowerShell is then matched as text only",
+		strings.Join(sections, " and "))
+}
+
 func runDoctor(args []string) int {
 	if len(args) != 0 {
 		fmt.Fprintln(os.Stderr, "usage: policygate doctor")
@@ -128,6 +161,9 @@ func runDoctor(args []string) int {
 		if warning := fallbackAskWarning(cfg); warning != "" {
 			fmt.Printf("config warning: %s\n", warning)
 		}
+		if warning := unanalyzedAskWarning(cfg); warning != "" {
+			fmt.Printf("config warning: %s\n", warning)
+		}
 	}
 	if exe, err := os.Executable(); err == nil {
 		fmt.Printf("binary: %s\n", exe)
@@ -139,7 +175,15 @@ func runDoctor(args []string) int {
 	} else {
 		fmt.Printf("self-protection: %s\n", strings.Join(guarded, ", "))
 	}
-	fmt.Printf("host: %s\n", resolveHost())
+	host := resolveHost()
+	fmt.Printf("host: %s\n", host)
+	// The dialect follows from the host and the platform, so a misconfigured
+	// --host silently changes which analysis runs. Show the result.
+	shell := resolveDialect(host, "Bash")
+	fmt.Printf("shell dialect: %s (structural analysis: %t)\n", shell, shell.Analyzable())
+	if shell != dialect.POSIX {
+		fmt.Println("shell warning: this host sends a dialect policygate cannot analyze structurally; only text rules apply")
+	}
 	if failures != 0 {
 		return 1
 	}

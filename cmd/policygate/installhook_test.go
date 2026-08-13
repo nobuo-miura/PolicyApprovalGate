@@ -83,12 +83,25 @@ func TestRewriteClaudeSettingsCreatesRegistration(t *testing.T) {
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out)
 	}
+	// Claude Code on Windows carries commands through a PowerShell tool as
+	// well as a Bash one, and a matcher of "Bash" alone leaves that traffic
+	// unexamined. Each tool gets its own group rather than an alternation,
+	// so a matcher compared literally still matches.
 	groups := parsed.Hooks.PreToolUse
-	if len(groups) != 1 || groups[0].Matcher != "Bash" || len(groups[0].Hooks) != 1 {
-		t.Fatalf("unexpected registration: %s", out)
+	registered := map[string]string{}
+	for _, group := range groups {
+		if len(group.Hooks) != 1 {
+			t.Fatalf("unexpected registration: %s", out)
+		}
+		registered[group.Matcher] = group.Hooks[0].Command
 	}
-	if groups[0].Hooks[0].Command != "/bin/policygate --host claude" {
-		t.Errorf("command = %q", groups[0].Hooks[0].Command)
+	for _, matcher := range claudeMatchers {
+		if got := registered[matcher]; got != "/bin/policygate --host claude" {
+			t.Errorf("matcher %q registered %q", matcher, got)
+		}
+	}
+	if len(registered) != len(claudeMatchers) {
+		t.Errorf("registered %d matchers, want %d: %s", len(registered), len(claudeMatchers), out)
 	}
 }
 
@@ -142,8 +155,8 @@ func TestRewriteClaudeSettingsReplacesAMovedBinary(t *testing.T) {
 	if strings.Contains(string(out), "/usr/local/bin/policygate") {
 		t.Errorf("the old registration survived: %s", out)
 	}
-	if strings.Count(string(out), "--host claude") != 1 {
-		t.Errorf("expected exactly one registration: %s", out)
+	if got := strings.Count(string(out), "--host claude"); got != len(claudeMatchers) {
+		t.Errorf("registered %d times, want one per matcher (%d): %s", got, len(claudeMatchers), out)
 	}
 }
 

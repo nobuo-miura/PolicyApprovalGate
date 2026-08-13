@@ -80,6 +80,26 @@ type ProtectedBranchesConfig struct {
 // ActionConfig defines the fallback for unmatched or unparseable commands.
 type ActionConfig struct {
 	Action string `yaml:"action"` // "defer" | "ask" | "deny"
+
+	// UnanalyzedAction replaces Action when the command's dialect has no
+	// structural analysis behind it.
+	//
+	// The two cases look identical in the result and mean opposite things. For
+	// a POSIX command, reaching the fallback means it was parsed, its paths
+	// were classified, and nothing applied. For PowerShell there is no parse
+	// and no classification, so reaching the fallback means only that no text
+	// rule happened to match - the command was never understood. Deferring both
+	// treats "we looked and it was ordinary" the same as "we did not look".
+	UnanalyzedAction string `yaml:"unanalyzed_action"` // "defer" | "ask" | "deny"
+}
+
+// For returns the action to apply. An empty unanalyzed_action falls back to
+// action, so a configuration written before the field existed keeps working.
+func (a ActionConfig) For(analyzable bool) string {
+	if !analyzable && a.UnanalyzedAction != "" {
+		return a.UnanalyzedAction
+	}
+	return a.Action
 }
 
 // AuditConfig controls JSON Lines audit logging.
@@ -306,8 +326,14 @@ func (c *Config) validate() error {
 	if !oneOf(c.Unknown.Action, "", "defer", "ask", "deny") {
 		errs = append(errs, fmt.Sprintf("unknown.action: invalid value %q (want defer, ask, or deny)", c.Unknown.Action))
 	}
+	if !oneOf(c.Unknown.UnanalyzedAction, "", "defer", "ask", "deny") {
+		errs = append(errs, fmt.Sprintf("unknown.unanalyzed_action: invalid value %q (want defer, ask, or deny)", c.Unknown.UnanalyzedAction))
+	}
 	if !oneOf(c.ParseError.Action, "", "defer", "ask", "deny") {
 		errs = append(errs, fmt.Sprintf("parse_error.action: invalid value %q (want defer, ask, or deny)", c.ParseError.Action))
+	}
+	if !oneOf(c.ParseError.UnanalyzedAction, "", "defer", "ask", "deny") {
+		errs = append(errs, fmt.Sprintf("parse_error.unanalyzed_action: invalid value %q (want defer, ask, or deny)", c.ParseError.UnanalyzedAction))
 	}
 	if !oneOf(c.Audit.CommandMode, "redacted", "full", "hash", "none") {
 		errs = append(errs, fmt.Sprintf("audit.command_mode: invalid value %q (want redacted, full, hash, or none)", c.Audit.CommandMode))

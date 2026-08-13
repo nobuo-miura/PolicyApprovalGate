@@ -54,7 +54,7 @@ fixture/goldenテストの互換性基準（2026-08-11時点）：
 
 実ホストの仕様変更に備え、入力fixtureと返却JSONのgoldenテストをCIで実行します。
 
-現時点の実行サポート対象はmacOSとLinuxです。WindowsはCIでビルドと単体テストを行いますが、PowerShellツール入力への対応が完了するまでは実験的サポートです。
+現時点の実行サポート対象はmacOSとLinuxです。WindowsはCIでビルドと単体テストを行い、PowerShellの方言判定とdenyルールを備えていますが、PowerShellコマンドからのパス抽出が未実装のため実験的サポートです。詳細は「PowerShellの扱い」を参照してください。
 
 ## クイックスタート
 
@@ -152,6 +152,7 @@ Codex hooksは既定で有効です。`codex_hooks` は非推奨の別名で、�
 | `protected_paths` | policygate設定やフック登録へのwrite / deleteを常に拒否 |
 | `unknown` | どのルールにも一致しない場合の `defer` / `ask` / `deny` |
 | `parse_error` | シェル構文を解析できない場合の `defer` / `ask` / `deny` |
+| `unknown.unanalyzed_action` / `parse_error.unanalyzed_action` | 構造解析のない方言（PowerShell）の場合に上記を置き換える動作 |
 | `audit` | 保存先、コマンド記録方式、ローテーション設定 |
 
 PolicyApprovalGateがコマンドを分類できない場合に確認を求めるには、フォールバック時の判定を`ask`に設定します。
@@ -211,6 +212,47 @@ allowルールは既知の低リスクコマンドを監査上分類するため
 
 対象外のコマンドはパスアクセスを生成せず、ほかのルールまたは `unknown.action` へ進みます。
 
+### PowerShellの扱い
+
+Windowsでは、コマンドがPowerShellで書かれている場合があります。
+
+- **Codex CLI on Windows** は `tool_name` に `Bash` を報告したままPowerShellを渡します。ツール名は方言の判定材料になりません
+- **Claude Code on Windows** は `Bash` とは別に `PowerShell` ツールを持ちます
+
+PolicyApprovalGateはホスト、ツール名、実行OSの組み合わせで方言を判定します。判定結果は `policygate doctor` と監査ログの `dialect` 項目で確認でき、`POLICYGATE_SHELL=posix|powershell` で上書きできます。
+
+**PowerShellにはシェル構文の完全な解析がありません。** 適用される保護に次の差が出ます。
+
+| | POSIX | PowerShell |
+| --- | --- | --- |
+| `deny` / `ask` / `allow` ルール | 適用 | 適用 |
+| `sensitive_paths` | 適用 | 適用（下記の範囲で） |
+| `path_scope`（プロジェクト内外） | 適用 | 適用（下記の範囲で） |
+| `protected_paths` | 適用 | 適用（下記の範囲で） |
+| `cd` 追跡 | 適用 | **非適用**（以降の相対パスを不定として扱う） |
+| シンボリックリンク解決 | 適用 | **非適用** |
+
+PowerShellのパスは、cmdletとそのパラメータからトークン単位で抽出します。`-Path` / `-LiteralPath` / `-Destination` などとその前置省略形（`-l` は `-LiteralPath` に届きます）、位置指定引数、`gc` / `ls` / `rm` などのエイリアス、カンマ区切りの配列に対応します。
+
+次のものは抽出できません。**抽出できなかったコマンドは「不定」として扱い、`unanalyzed_action` に従います。**
+
+- パイプライン経由で渡される対象（`Get-ChildItem X | Remove-Item` の削除対象）
+- 変数や部分式で組み立てたパス（`Remove-Item $target`、`Join-Path`）
+- `Set-Location` 以降の相対パス
+- ワイルドカード（`C:\temp\*` はパスとしてそのまま扱います）
+- バッククォートによる難読化、文字列連結
+
+そのため一致しなかった場合の意味が方言で変わります。POSIXなら「解析した上でどのルールにも当たらなかった」ですが、PowerShellでは「そもそも解析できていない」です。この2つを同じに扱わないため、`unanalyzed_action`（既定 `ask`）が `action` を置き換えます。
+
+**Codex on Windowsは全コマンドがPowerShellで、かつaskをdenyへ変換します。** 既定のままでは通常の操作まで拒否されるため、`POLICYGATE_CONFIG` でCodex専用の設定ファイルを用意し、`unanalyzed_action: defer` を指定してください。その場合、Codex on Windowsで有効なのは`deny`/`ask`のテキストルールだけになります。
+
+```yaml
+unknown:
+  unanalyzed_action: defer
+parse_error:
+  unanalyzed_action: defer
+```
+
 ### 大文字小文字の扱い
 
 ルール照合（`deny` / `ask` / `allow` / `sensitive_paths` / `protected_paths`）は、実行プラットフォームによらず**常に大文字小文字を区別しません**。
@@ -268,7 +310,8 @@ policygate version
 
 ## 制限事項
 
-- Bashツール呼び出しだけが対象です。ほかのツールや直接のファイル編集は検査しません。
+- Bashツール呼び出しと、Claude Code on Windowsの`PowerShell`ツール呼び出しが対象です。ほかのツールや直接のファイル編集は検査しません。
+- PowerShellはシェル構文を完全には解析しません。パスはcmdletとパラメータから抽出しますが、パイプライン経由の対象、変数で組み立てたパス、`Set-Location`以降の相対パスは抽出できず、`cd`追跡とシンボリックリンク解決は行いません。抽出できなかったコマンドは`unanalyzed_action`（既定`ask`）に従います。詳細は「PowerShellの扱い」を参照してください。
 - `ask`判定はClaude Codeでは確認を求めますが、PreToolUse hook単独の確認に対応しないCodexでは`deny`へ変換されます。そのため、同じポリシーでもClaude Codeでは確認画面が表示され、Codexではコマンドが拒否されるという操作上の違いがあります。
 - 正規表現と限定的なシェル解析のため、難読化や未対応構文を完全には扱えません。
 - プロジェクト内外の判定は、実行プラットフォームの既定のファイルシステム挙動に従います。大文字小文字を区別する構成で作成したmacOSボリューム上では、大文字小文字だけが異なる別ディレクトリをプロジェクト内と誤判定する場合があります。逆に大文字小文字を区別しない構成でマウントしたLinuxファイルシステム上では、プロジェクト内のパスをプロジェクト外として扱う場合があります。ルール照合そのものは前者の影響を受けません。

@@ -152,10 +152,10 @@ func FuzzClassifyDoesNotPanic(f *testing.F) {
 	})
 }
 
-// On a case-insensitive filesystem the hook's working directory and a command's
-// path argument can spell the same tree differently. Comparing them byte for
-// byte would place a project file outside its own project.
-func TestIsOutsideFollowsPlatformCaseRules(t *testing.T) {
+// Containment on a root that cannot be probed - one that does not exist -
+// falls back to the platform default. The behaviour on a real filesystem is
+// covered by TestIsOutsideFollowsTheProjectFilesystem.
+func TestIsOutsideOnAnUnprobeableRoot(t *testing.T) {
 	const root = "/Users/user/Project"
 
 	if IsOutside(root, root) {
@@ -167,8 +167,8 @@ func TestIsOutsideFollowsPlatformCaseRules(t *testing.T) {
 
 	mixed := "/users/user/project/src/main.go"
 	if got := IsOutside(root, mixed); got == paths.FSIgnoresCase {
-		t.Errorf("IsOutside(%q, %q) = %v, want %v on this platform",
-			root, mixed, got, !paths.FSIgnoresCase)
+		t.Errorf("IsOutside(%q, %q) = %v, want the platform fallback to apply",
+			root, mixed, got)
 	}
 
 	// Folding case must not turn a prefix-sharing sibling into a child.

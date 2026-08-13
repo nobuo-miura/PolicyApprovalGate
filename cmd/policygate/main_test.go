@@ -42,7 +42,7 @@ func TestEvaluateDoesNotAllowChainOnPrefixMatch(t *testing.T) {
 		"git status && git reset --hard HEAD~1",
 		"ls && cd /tmp && rm -rf harmless-review-target",
 	} {
-		decision, _, source, _ := evaluate(cfg, in, cmd)
+		decision, _, source, _ := evaluatePOSIX(cfg, in, cmd)
 		if source == "allow_rule" || source == "allow_rule_chain" {
 			t.Errorf("evaluate(%q) = decision:%q source:%q — must not be allowed via an allow rule", cmd, decision, source)
 		}
@@ -56,7 +56,7 @@ func TestEvaluateClassifiesAllowedChainWithoutBypassingApproval(t *testing.T) {
 	cfg := mustConfig(t, allowRulesYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "git status && git log")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "git status && git log")
 	if decision != "" {
 		t.Errorf("decision = %q, want defer", decision)
 	}
@@ -69,7 +69,7 @@ func TestEvaluateClassifiesSingleSafeCommandWithoutBypassingApproval(t *testing.
 	cfg := mustConfig(t, allowRulesYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "git status")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "git status")
 	if decision != "" || source != "allow_rule" {
 		t.Errorf("decision=%q source=%q, want defer/allow_rule", decision, source)
 	}
@@ -97,7 +97,7 @@ func TestEvaluateFollowsCdBeforeClassifyingPaths(t *testing.T) {
 	outsideDir := filepath.ToSlash(t.TempDir())
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
-	decision, _, source, _ := evaluate(cfg, in, fmt.Sprintf("cd %s && rm -rf harmless-review-target", outsideDir))
+	decision, _, source, _ := evaluatePOSIX(cfg, in, fmt.Sprintf("cd %s && rm -rf harmless-review-target", outsideDir))
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy for a delete outside the project via cd", decision, source)
 	}
@@ -112,7 +112,7 @@ func TestEvaluateFollowsSymlinkEscape(t *testing.T) {
 	}
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
-	decision, _, source, _ := evaluate(cfg, in, "rm -rf escape/harmless-review-target")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "rm -rf escape/harmless-review-target")
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy for a delete through a symlink pointing outside the project", decision, source)
 	}
@@ -128,7 +128,7 @@ func TestEvaluateHandlesFailedCd(t *testing.T) {
 		"cd missing/sub; rm -rf ../../outside-target",
 		"cd missing/sub || rm -rf ../../outside-target",
 	} {
-		decision, _, source, _ := evaluate(cfg, in, cmd)
+		decision, _, source, _ := evaluatePOSIX(cfg, in, cmd)
 		if decision != hook.DecisionDeny || source != "path_policy" {
 			t.Errorf("evaluate(%q) = decision:%q source:%q, want deny/path_policy", cmd, decision, source)
 		}
@@ -148,7 +148,7 @@ func TestEvaluateFollowsSymlinkCreatedEarlierInChain(t *testing.T) {
 		"ln -s " + outsideDir + " escape && cd escape && rm -rf target",
 		"ln -s " + outsideDir + " escape2 && echo data > escape2/file",
 	} {
-		decision, _, source, _ := evaluate(cfg, in, cmd)
+		decision, _, source, _ := evaluatePOSIX(cfg, in, cmd)
 		if source != "path_policy" || (decision != hook.DecisionDeny && decision != hook.DecisionAsk) {
 			t.Errorf("evaluate(%q) = decision:%q source:%q, want deny-or-ask/path_policy", cmd, decision, source)
 		}
@@ -168,7 +168,7 @@ func TestEvaluateFollowsSymlinkCreatedInsideExistingDirectory(t *testing.T) {
 	// directory that way rather than in the host's native format.
 	cmd := "ln -s " + filepath.ToSlash(outsideDir) + " links && cd links/" + outsideBase + " && rm -rf target"
 
-	decision, _, source, _ := evaluate(cfg, in, cmd)
+	decision, _, source, _ := evaluatePOSIX(cfg, in, cmd)
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("evaluate(%q) = decision:%q source:%q, want deny/path_policy", cmd, decision, source)
 	}
@@ -179,7 +179,7 @@ func TestEvaluateAllowsDeleteInsideProject(t *testing.T) {
 	projectDir := t.TempDir()
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
-	decision, _, source, _ := evaluate(cfg, in, "rm -rf build")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "rm -rf build")
 	if decision == hook.DecisionDeny || source == "path_policy" {
 		t.Errorf("decision=%q source=%q, did not expect a delete confined to the project to be blocked", decision, source)
 	}
@@ -212,7 +212,7 @@ func TestEvaluateBlocksWritesToProtectedPaths(t *testing.T) {
 		{"echo pwned > .claude/settings.json", "path_policy"},
 		{"python3 -c 'open(\".policygate/config.yaml\", \"w\").write(\"x\")'", "deny_rule"},
 	} {
-		decision, _, source, _ := evaluate(cfg, in, test.command)
+		decision, _, source, _ := evaluatePOSIX(cfg, in, test.command)
 		if decision != hook.DecisionDeny || source != test.source {
 			t.Errorf("evaluate(%q) = decision:%q source:%q, want deny/%s", test.command, decision, source, test.source)
 		}
@@ -224,7 +224,7 @@ func TestEvaluateTreatsComplexCWDScopeAsIndeterminate(t *testing.T) {
 	projectDir := t.TempDir()
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
-	decision, _, source, _ := evaluate(cfg, in, "(cd /tmp); rm -rf local-name")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "(cd /tmp); rm -rf local-name")
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want conservative deny/path_policy", decision, source)
 	}
@@ -244,7 +244,7 @@ func TestEvaluateKeepsInProjectWorkWithoutDirectoryChange(t *testing.T) {
 		"sleep 1 & touch x",
 		"make build || touch failed.log",
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != "" {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want no decision", command, decision, source, reason)
 		}
@@ -259,7 +259,7 @@ func TestEvaluateTracksEnvChdirWrapper(t *testing.T) {
 	outsideDir := filepath.ToSlash(t.TempDir())
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
-	decision, _, source, _ := evaluate(cfg, in, "env -C "+outsideDir+" rm -f target")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "env -C "+outsideDir+" rm -f target")
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy", decision, source)
 	}
@@ -283,7 +283,7 @@ audit:
 
 	// Shell command text is always forward-slash, so embed the real
 	// project directory that way rather than in the host's native format.
-	decision, _, source, _ := evaluate(cfg, in, "cd "+filepath.ToSlash(projectDir)+" & rm -rf ./target")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "cd "+filepath.ToSlash(projectDir)+" & rm -rf ./target")
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy", decision, source)
 	}
@@ -310,7 +310,7 @@ audit:
 	// directory that way rather than in the host's native format.
 	command := "ln -s " + filepath.ToSlash(outsideDir) + " escape & rm -rf escape/target"
 
-	decision, _, source, _ := evaluate(cfg, in, command)
+	decision, _, source, _ := evaluatePOSIX(cfg, in, command)
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy", decision, source)
 	}
@@ -319,7 +319,7 @@ audit:
 func TestAllowRulesNeverEmitAllow(t *testing.T) {
 	cfg := mustConfig(t, "allow:\n  - pattern: '^git\\s+branch\\b'\n    reason: classification only\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
-	decision, _, _, _ := evaluate(cfg, in, "git branch -D main")
+	decision, _, _, _ := evaluatePOSIX(cfg, in, "git branch -D main")
 	if decision == hook.Decision("allow") {
 		t.Fatal("allow classification bypassed host approval")
 	}
@@ -371,7 +371,7 @@ func TestEvaluateAllowsReadingProtectedPaths(t *testing.T) {
 	cfg := mustConfig(t, protectedPathsYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "cat .claude/settings.json")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "cat .claude/settings.json")
 	if decision == hook.DecisionDeny || source == "path_policy" {
 		t.Errorf("decision=%q source=%q, did not expect a read of a protected path to be blocked", decision, source)
 	}
@@ -391,7 +391,7 @@ func TestEvaluateBlocksMirrorPush(t *testing.T) {
 	cfg := mustConfig(t, protectedBranchYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "git push --mirror origin")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "git push --mirror origin")
 	if decision != hook.DecisionDeny || source != "protected_branch" {
 		t.Errorf("decision=%q source=%q, want deny/protected_branch for git push --mirror", decision, source)
 	}
@@ -415,7 +415,7 @@ func TestEvaluateAsksOnSensitiveRead(t *testing.T) {
 	cfg := mustConfig(t, sensitivePathYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "cat ~/.ssh/id_rsa")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "cat ~/.ssh/id_rsa")
 	if decision != hook.DecisionAsk || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want ask/path_policy for reading a sensitive path", decision, source)
 	}
@@ -425,7 +425,7 @@ func TestEvaluateAsksOnSensitiveDirRead(t *testing.T) {
 	cfg := mustConfig(t, sensitivePathYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "ls -la ~/.ssh")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "ls -la ~/.ssh")
 	if decision != hook.DecisionAsk || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want ask/path_policy for listing a sensitive directory without a trailing slash", decision, source)
 	}
@@ -446,7 +446,7 @@ func TestEvaluateAsksOnAskRule(t *testing.T) {
 	cfg := mustConfig(t, askRulesYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, matchedBy := evaluate(cfg, in, "git push origin main")
+	decision, _, source, matchedBy := evaluatePOSIX(cfg, in, "git push origin main")
 	if decision != hook.DecisionAsk || source != "ask_rule" {
 		t.Errorf("decision=%q source=%q, want ask/ask_rule for a matched ask rule", decision, source)
 	}
@@ -461,7 +461,7 @@ func TestEvaluateAsksOnAskRuleThroughQuoting(t *testing.T) {
 	cfg := mustConfig(t, askRulesYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, `g'i't push origin main`)
+	decision, _, source, _ := evaluatePOSIX(cfg, in, `g'i't push origin main`)
 	if decision != hook.DecisionAsk || source != "ask_rule" {
 		t.Errorf("decision=%q source=%q, want ask/ask_rule for a quoted program name", decision, source)
 	}
@@ -472,7 +472,7 @@ func TestEvaluateAllowsReadOnlyGitDespiteAskRules(t *testing.T) {
 	cfg := mustConfig(t, askRulesYAML)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "git status")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "git status")
 	if decision != "" || source != "allow_rule" {
 		t.Errorf("decision=%q source=%q, want empty/allow_rule for git status", decision, source)
 	}
@@ -488,7 +488,7 @@ audit:
 `)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "rm -rf /")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "rm -rf /")
 	if decision != hook.DecisionDeny || source != "deny_rule" {
 		t.Errorf("decision=%q source=%q, want deny/deny_rule", decision, source)
 	}
@@ -530,7 +530,7 @@ func TestEvaluateBlocksRecursiveForceDeleteOfRootOrHomeAcrossFlagForms(t *testin
 	}
 	for _, test := range tests {
 		in := hook.Input{ToolName: "Bash", CWD: test.cwd}
-		decision, _, source, _ := evaluate(cfg, in, test.command)
+		decision, _, source, _ := evaluatePOSIX(cfg, in, test.command)
 		if decision != hook.DecisionDeny || source != "critical_delete" {
 			t.Errorf("evaluate(%q) = decision:%q source:%q, want deny/critical_delete", test.command, decision, source)
 		}
@@ -559,7 +559,7 @@ func TestEvaluateSeesThroughTransparentWrappers(t *testing.T) {
 		"echo done | sudo halt",
 		`sudo python3 -c "open('.policygate/config.yaml','w')"`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != hook.DecisionDeny {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want deny", command, decision, source, reason)
 		}
@@ -580,7 +580,7 @@ func TestEvaluateDeniesQuoteSplitProgramNames(t *testing.T) {
 		`\rm -rf /`,
 		`'rm' -rf /`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != hook.DecisionDeny {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want deny", command, decision, source, reason)
 		}
@@ -600,7 +600,7 @@ func TestEvaluateInspectsLiteralNestedScripts(t *testing.T) {
 		{`eval 'git push -f origin main'`, "protected_branch"},
 		{`sh -c 'rm -rf /'`, "deny_rule"},
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, tc.command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, tc.command)
 		if decision != hook.DecisionDeny {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want deny", tc.command, decision, source, reason)
 		}
@@ -623,7 +623,7 @@ func TestEvaluateInspectsEscapedQuotesInsideLiteralNestedScripts(t *testing.T) {
 		{`sh -c "sh -c \"rm -rf /\""`, "deny_rule"},
 		{`sh -c "cat \"$HOME/.ssh/id_rsa\""`, "path_policy"},
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, tc.command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, tc.command)
 		if decision == "" || source != tc.wantSource {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want decision/%s", tc.command, decision, source, reason, tc.wantSource)
 		}
@@ -644,7 +644,7 @@ func TestEvaluateBlocksRecursiveForceDeleteOfHomeExpansion(t *testing.T) {
 		`rm -rf "${HOME}"`,
 		`nice rm -rf "$HOME"`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != hook.DecisionDeny || source != "critical_delete" {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want deny/critical_delete", command, decision, source, reason)
 		}
@@ -668,7 +668,7 @@ func TestEvaluateDoesNotReinterpretQuotedArgumentsAsSyntax(t *testing.T) {
 		`echo \; reboot-notes`,
 		`git commit -m "fix: don't reboot"`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != "" {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want no decision", command, decision, source, reason)
 		}
@@ -691,7 +691,7 @@ func TestEvaluateStillDeniesUnquotedDangerousCommands(t *testing.T) {
 		`cat x > /dev/sda`,
 		`echo x > "/dev/sda"`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != hook.DecisionDeny {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want deny", command, decision, source, reason)
 		}
@@ -717,7 +717,7 @@ func TestEvaluateBlocksCriticalDeleteBehindArgumentIndirection(t *testing.T) {
 		`nice env -S rm -rf /`,
 		`busybox rm -rf $HOME`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != hook.DecisionDeny {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want deny", command, decision, source, reason)
 		}
@@ -738,7 +738,7 @@ func TestEvaluateBlocksCriticalDeleteWithUnresolvedXargsInput(t *testing.T) {
 		`xargs rm -rf <<< "'/'"`,
 		`printf '/\n' | xargs -I{} sh -c 'rm -rf "$1"' _ {}`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != hook.DecisionDeny || source != "critical_delete" {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want deny/critical_delete", command, decision, source, reason)
 		}
@@ -753,7 +753,7 @@ func TestEvaluatePreservesKnownSafeXargsInput(t *testing.T) {
 		`xargs rm -rf build <<< cache`,
 		`xargs echo safe < targets.txt`,
 	} {
-		decision, reason, source, _ := evaluate(cfg, in, command)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, command)
 		if decision != "" {
 			t.Errorf("evaluate(%q) = %q (%s: %s), want no decision", command, decision, source, reason)
 		}
@@ -781,7 +781,7 @@ func TestEvaluateClassifiesQuotedOutsidePath(t *testing.T) {
 	projectDir := t.TempDir()
 	in := hook.Input{ToolName: "Bash", CWD: projectDir}
 
-	decision, _, source, _ := evaluate(cfg, in, `rm -f "../outside target"`)
+	decision, _, source, _ := evaluatePOSIX(cfg, in, `rm -f "../outside target"`)
 	if decision != hook.DecisionDeny || source != "path_policy" {
 		t.Fatalf("quoted outside delete = decision:%q source:%q, want deny/path_policy", decision, source)
 	}
@@ -813,7 +813,7 @@ func TestEvaluatePreservesOrdinaryRecursiveDelete(t *testing.T) {
 		{cwd: home, command: "rm --recursive ~"},
 	} {
 		in := hook.Input{ToolName: "Bash", CWD: test.cwd}
-		decision, _, source, _ := evaluate(cfg, in, test.command)
+		decision, _, source, _ := evaluatePOSIX(cfg, in, test.command)
 		if decision == hook.DecisionDeny && source == "critical_delete" {
 			t.Errorf("%q must remain governed by normal path policy", test.command)
 		}
@@ -824,7 +824,7 @@ func TestEvaluateUnknownDefersByDefault(t *testing.T) {
 	cfg := mustConfig(t, "audit:\n  enabled: false\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "some-totally-unrecognized-command --with-args")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "some-totally-unrecognized-command --with-args")
 	if decision != "" || source != "unknown" {
 		t.Errorf("decision=%q source=%q, want silent defer/unknown", decision, source)
 	}
@@ -834,7 +834,7 @@ func TestEvaluateUnknownDeniesWhenConfigured(t *testing.T) {
 	cfg := mustConfig(t, "unknown:\n  action: deny\naudit:\n  enabled: false\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "some-totally-unrecognized-command --with-args")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "some-totally-unrecognized-command --with-args")
 	if decision != hook.DecisionDeny || source != "unknown" {
 		t.Errorf("decision=%q source=%q, want deny/unknown", decision, source)
 	}
@@ -844,7 +844,7 @@ func TestEvaluateUnknownAsksWhenConfigured(t *testing.T) {
 	cfg := mustConfig(t, "unknown:\n  action: ask\naudit:\n  enabled: false\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "some-totally-unrecognized-command --with-args")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "some-totally-unrecognized-command --with-args")
 	if decision != hook.DecisionAsk || source != "unknown" {
 		t.Errorf("decision=%q source=%q, want ask/unknown", decision, source)
 	}
@@ -854,7 +854,7 @@ func TestEvaluateParseErrorDefersByDefault(t *testing.T) {
 	cfg := mustConfig(t, "audit:\n  enabled: false\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "echo 'unterminated")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "echo 'unterminated")
 	if decision != "" || source != "parse_error" {
 		t.Errorf("decision=%q source=%q, want silent defer/parse_error", decision, source)
 	}
@@ -864,7 +864,7 @@ func TestEvaluateParseErrorDeniesWhenConfigured(t *testing.T) {
 	cfg := mustConfig(t, "parse_error:\n  action: deny\naudit:\n  enabled: false\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "echo 'unterminated")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "echo 'unterminated")
 	if decision != hook.DecisionDeny || source != "parse_error" {
 		t.Errorf("decision=%q source=%q, want deny/parse_error", decision, source)
 	}
@@ -874,7 +874,7 @@ func TestEvaluateParseErrorAsksWhenConfigured(t *testing.T) {
 	cfg := mustConfig(t, "parse_error:\n  action: ask\naudit:\n  enabled: false\n")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	decision, _, source, _ := evaluate(cfg, in, "echo 'unterminated")
+	decision, _, source, _ := evaluatePOSIX(cfg, in, "echo 'unterminated")
 	if decision != hook.DecisionAsk || source != "parse_error" {
 		t.Errorf("decision=%q source=%q, want ask/parse_error", decision, source)
 	}
@@ -1139,7 +1139,7 @@ func TestHostFixturesProduceGoldenDenyOutput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		decision, reason, _, _ := evaluate(cfg, in, in.ToolInput.Command)
+		decision, reason, _, _ := evaluatePOSIX(cfg, in, in.ToolInput.Command)
 		decision, reason = finalizeForHost(fixture.host, decision, reason)
 		var output bytes.Buffer
 		if err := hook.WriteDecision(&output, decision, reason); err != nil {

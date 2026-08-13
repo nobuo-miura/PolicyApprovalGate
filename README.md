@@ -54,7 +54,7 @@ Fixture/golden compatibility baseline as of 2026-08-11:
 
 CI exercises input fixtures and golden return JSON to detect host-contract drift.
 
-The currently supported runtime platforms are macOS and Linux. Windows is built and unit-tested in CI, but remains experimental until PowerShell tool-input support is complete.
+The currently supported runtime platforms are macOS and Linux. Windows is built and unit-tested in CI and carries PowerShell dialect detection and deny rules, but remains experimental until paths can be extracted from PowerShell commands. See "PowerShell" for what that means in practice.
 
 ## Quick start
 
@@ -152,6 +152,7 @@ See [internal/rules/default.yaml](internal/rules/default.yaml) for every built-i
 | `protected_paths` | Always deny writes and deletes to gate configuration and hook registration |
 | `unknown` | `defer`, `ask`, or `deny` when no rule matches |
 | `parse_error` | `defer`, `ask`, or `deny` when shell syntax cannot be parsed |
+| `unknown.unanalyzed_action` / `parse_error.unanalyzed_action` | Replaces the above for a dialect with no structural analysis (PowerShell) |
 | `audit` | Configure path, command recording, and rotation |
 
 To require confirmation when PolicyApprovalGate cannot classify a command, set the fallback actions to `ask`:
@@ -211,6 +212,47 @@ Only a `cd` in one of those positions makes anything indeterminate. A pipeline o
 
 Unsupported commands produce no path accesses and continue to other rules or `unknown.action`.
 
+### PowerShell
+
+On Windows a command may be written in PowerShell.
+
+- **Codex CLI on Windows** sends PowerShell while still reporting `tool_name` as `Bash`. The tool name is not a signal of the dialect.
+- **Claude Code on Windows** carries a `PowerShell` tool alongside its `Bash` one.
+
+PolicyApprovalGate determines the dialect from the host, the tool name, and the running platform. The result appears in `policygate doctor` and in the `dialect` field of the audit log, and `POLICYGATE_SHELL=posix|powershell` overrides it.
+
+**PowerShell shell syntax is not fully parsed**, which changes what applies:
+
+| | POSIX | PowerShell |
+| --- | --- | --- |
+| `deny` / `ask` / `allow` rules | Applied | Applied |
+| `sensitive_paths` | Applied | Applied, within the limits below |
+| `path_scope` (inside/outside the project) | Applied | Applied, within the limits below |
+| `protected_paths` | Applied | Applied, within the limits below |
+| `cd` tracking | Applied | **Not applied** (later relative paths become indeterminate) |
+| Symlink resolution | Applied | **Not applied** |
+
+PowerShell paths are recovered from a cmdlet and its parameters by tokenizing the command. `-Path`, `-LiteralPath`, `-Destination`, `-OutFile` and their abbreviations are honoured (`-l` reaches `-LiteralPath`), along with positional arguments, the aliases Windows PowerShell defines (`gc`, `ls`, `rm`, and the rest), and comma-separated arrays.
+
+These cannot be recovered. **A command whose paths cannot be pinned down is treated as indeterminate and follows `unanalyzed_action`.**
+
+- A target arriving through the pipeline (what `Get-ChildItem X | Remove-Item` deletes)
+- A path built from a variable or a subexpression (`Remove-Item $target`, `Join-Path`)
+- A relative path after `Set-Location`
+- Wildcards (`C:\temp\*` is treated as a literal path)
+- Backtick obfuscation and string concatenation
+
+A non-match therefore means different things in each dialect. Under POSIX it means the command was analyzed and no rule applied; under PowerShell it means the command was never understood. To keep the two apart, `unanalyzed_action` (default `ask`) replaces `action` for a dialect with no structural analysis.
+
+**Codex on Windows sends PowerShell for every command and converts ask to deny.** Left at the default it would reject ordinary work, so give Codex its own configuration file through `POLICYGATE_CONFIG` with `unanalyzed_action: defer`. Only the `deny` and `ask` text rules then apply there.
+
+```yaml
+unknown:
+  unanalyzed_action: defer
+parse_error:
+  unanalyzed_action: defer
+```
+
 ### Case sensitivity
 
 Rule matching (`deny`, `ask`, `allow`, `sensitive_paths`, and `protected_paths`) **ignores case on every platform**.
@@ -268,7 +310,8 @@ policygate version
 
 ## Limitations
 
-- Only Bash tool calls are covered. Other tools and direct file edits are not inspected.
+- Bash tool calls and the `PowerShell` tool calls of Claude Code on Windows are covered. Other tools and direct file edits are not inspected.
+- PowerShell shell syntax is not fully parsed. Paths are recovered from a cmdlet and its parameters, but a target arriving through the pipeline, a path built from a variable, and a relative path after `Set-Location` cannot be; `cd` tracking and symlink resolution do not apply. A command whose paths cannot be pinned down follows `unanalyzed_action` (default `ask`). See "PowerShell" for the details.
 - An `ask` decision prompts for confirmation in Claude Code but is converted to `deny` in Codex, which does not support standalone confirmation from a PreToolUse hook. The same policy can therefore produce a prompt on Claude Code and a rejected command on Codex.
 - Regex and bounded shell analysis cannot fully handle obfuscation or unsupported syntax.
 - Deciding whether a path lies inside the project follows the running platform's default filesystem behavior. On a case-sensitive macOS volume, a separate directory differing only by case may be treated as inside the project; on a case-insensitive Linux mount, a path inside the project may be treated as outside it. Rule matching itself is unaffected by the former.

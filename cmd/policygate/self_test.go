@@ -50,7 +50,7 @@ func TestSelfProtectionSurvivesEveryPathCheckBeingDisabled(t *testing.T) {
 		"env rm -f /opt/homebrew/bin/policygate",
 	}
 	for _, cmd := range cases {
-		decision, reason, source, _ := evaluate(cfg, in, cmd)
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, cmd)
 		if decision != hook.DecisionDeny || source != "self_protection" {
 			t.Errorf("evaluate(%q) = %q/%q (%s), want deny/self_protection", cmd, decision, source, reason)
 		}
@@ -80,7 +80,7 @@ func TestSelfProtectionFollowsAnEarlierCd(t *testing.T) {
 
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 	cmd := fmt.Sprintf("cd %s && rm -f %s", filepath.ToSlash(dir), name)
-	if decision, reason, source, _ := evaluate(cfg, in, cmd); decision != hook.DecisionDeny || source != "self_protection" {
+	if decision, reason, source, _ := evaluatePOSIX(cfg, in, cmd); decision != hook.DecisionDeny || source != "self_protection" {
 		t.Errorf("evaluate(%q) = %q/%q (%s), want deny/self_protection", cmd, decision, source, reason)
 	}
 }
@@ -96,7 +96,7 @@ func TestSelfProtectionCoversInvocationPathAndTarget(t *testing.T) {
 		"rm -f /opt/homebrew/bin/policygate",
 		"rm -f /opt/homebrew/Cellar/policygate/1.0.0/bin/policygate",
 	} {
-		if decision, _, source, _ := evaluate(cfg, in, cmd); decision != hook.DecisionDeny || source != "self_protection" {
+		if decision, _, source, _ := evaluatePOSIX(cfg, in, cmd); decision != hook.DecisionDeny || source != "self_protection" {
 			t.Errorf("evaluate(%q) = %q/%q, want deny/self_protection", cmd, decision, source)
 		}
 	}
@@ -109,7 +109,7 @@ func TestSelfProtectionIgnoresCase(t *testing.T) {
 	guardSelf(t, "/opt/homebrew/bin/policygate")
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	if decision, _, source, _ := evaluate(cfg, in, "rm -f /opt/Homebrew/bin/POLICYGATE"); decision != hook.DecisionDeny || source != "self_protection" {
+	if decision, _, source, _ := evaluatePOSIX(cfg, in, "rm -f /opt/Homebrew/bin/POLICYGATE"); decision != hook.DecisionDeny || source != "self_protection" {
 		t.Errorf("decision=%q source=%q, want deny/self_protection", decision, source)
 	}
 }
@@ -125,7 +125,7 @@ func TestSelfProtectionAllowsReads(t *testing.T) {
 		"cat /opt/homebrew/bin/policygate",
 		"shasum -a 256 /opt/homebrew/bin/policygate",
 	} {
-		if decision, _, source, _ := evaluate(cfg, in, cmd); decision == hook.DecisionDeny {
+		if decision, _, source, _ := evaluatePOSIX(cfg, in, cmd); decision == hook.DecisionDeny {
 			t.Errorf("evaluate(%q) = deny (%s), want the read to pass", cmd, source)
 		}
 	}
@@ -142,7 +142,7 @@ func TestSelfProtectionDoesNotOverreach(t *testing.T) {
 		"rm -f /opt/homebrew/bin/other",
 		"rm -f /opt/homebrew/bin",
 	} {
-		if decision, _, source, _ := evaluate(cfg, in, cmd); source == "self_protection" {
+		if decision, _, source, _ := evaluatePOSIX(cfg, in, cmd); source == "self_protection" {
 			t.Errorf("evaluate(%q) = %q/self_protection, want no self-protection match", cmd, decision)
 		}
 	}
@@ -154,7 +154,7 @@ func TestSelfProtectionInactiveWithoutAResolvedPath(t *testing.T) {
 	guardSelf(t)
 	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
 
-	if decision, _, source, _ := evaluate(cfg, in, "rm -f /opt/homebrew/bin/policygate"); source == "self_protection" {
+	if decision, _, source, _ := evaluatePOSIX(cfg, in, "rm -f /opt/homebrew/bin/policygate"); source == "self_protection" {
 		t.Errorf("decision=%q source=%q, want no self-protection without a resolved path", decision, source)
 	}
 }
@@ -166,7 +166,7 @@ func TestSelfProtectionLeavesConfiguredRulesIntact(t *testing.T) {
 	dir := t.TempDir()
 	in := hook.Input{ToolName: "Bash", CWD: dir}
 
-	if decision, _, source, _ := evaluate(cfg, in, "rm -f .claude/settings.json"); decision != hook.DecisionDeny || source != "path_policy" {
+	if decision, _, source, _ := evaluatePOSIX(cfg, in, "rm -f .claude/settings.json"); decision != hook.DecisionDeny || source != "path_policy" {
 		t.Errorf("decision=%q source=%q, want deny/path_policy", decision, source)
 	}
 }

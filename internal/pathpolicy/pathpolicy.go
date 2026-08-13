@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
 
@@ -659,23 +658,25 @@ func ResolvePhysical(path string) string {
 // arguments are expected to already be clean, forward-slash paths, as
 // returned by ResolvePhysical.
 //
-// Where the filesystem ignores case, so does the comparison: on Windows a hook
-// reporting C:/Project and a command naming c:/project/src refer to the same
-// tree, and comparing them byte for byte would place the file outside its own
-// project.
+// The comparison ignores case only where the filesystem holding the root does:
+// on Windows a hook reporting C:/Project and a command naming c:/project/src
+// refer to the same tree, while on a case-sensitive volume they are two
+// directories and folding them together would put one inside the other. See
+// casefold.go for why this is answered by probing rather than by the OS.
 func IsOutside(resolvedRoot, resolvedPath string) bool {
 	if resolvedRoot == "" {
 		return true
 	}
+	ignoreCase := rootIgnoresCase(resolvedRoot)
 	root := strings.TrimSuffix(resolvedRoot, "/")
-	if samePath(resolvedPath, root) || samePath(resolvedPath, resolvedRoot) {
+	if samePath(resolvedPath, root, ignoreCase) || samePath(resolvedPath, resolvedRoot, ignoreCase) {
 		return false
 	}
-	return !hasPathPrefix(resolvedPath, root+"/")
+	return !hasPathPrefix(resolvedPath, root+"/", ignoreCase)
 }
 
-func samePath(a, b string) bool {
-	if paths.FSIgnoresCase {
+func samePath(a, b string, ignoreCase bool) bool {
+	if ignoreCase {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
@@ -684,8 +685,8 @@ func samePath(a, b string) bool {
 // hasPathPrefix compares byte-for-byte lengths even when folding case. Simple
 // case folding can change a string's encoded length for a few exotic runes, so
 // such a path is reported as outside the root: the conservative answer.
-func hasPathPrefix(s, prefix string) bool {
-	if !paths.FSIgnoresCase {
+func hasPathPrefix(s, prefix string, ignoreCase bool) bool {
+	if !ignoreCase {
 		return strings.HasPrefix(s, prefix)
 	}
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
