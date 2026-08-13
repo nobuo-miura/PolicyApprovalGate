@@ -18,6 +18,7 @@ The built-in rules are intended to reduce missed, clearly dangerous operations, 
 - Controls for force pushes, deletion, and direct pushes to protected branches
 - Read / write / delete classification for path access
 - Policies for out-of-project, sensitive, and protected paths
+- Case-insensitive rule matching, so a filesystem that ignores case cannot be used to slip past a rule
 - Path tracking that accounts for `cd` and symbolic links
 - Normalization for `env` / `command`, `git -C`, and `cp/install -t`
 - Analysis of statically quoted paths and critical deletes inside literal `sh/bash/zsh -c` and `eval` scripts
@@ -214,6 +215,19 @@ Only a `cd` in one of those positions makes anything indeterminate. A pipeline o
 
 Unsupported commands produce no path accesses and continue to other rules or `unknown.action`.
 
+### Case sensitivity
+
+Rule matching (`deny`, `ask`, `allow`, `sensitive_paths`, and `protected_paths`) **ignores case on every platform**.
+
+A filesystem that ignores case would otherwise let a different spelling walk past a rule. Windows NTFS and the default macOS APFS configuration both work this way, and so does Linux with ext4 casefold, an exFAT/NTFS mount, or a network share. On such a filesystem:
+
+- `.ENV` opens the same file as `.env`, so it slips past a rule written for `.env`
+- Command names are resolved the same way through `PATH`, so `RM -rf /` runs the same binary as `rm -rf /`
+
+On a genuinely case-sensitive filesystem this behavior can over-match: a distinct file or program whose name differs only by case is treated as a match. That is the direction a gate should fail in, which is why it applies everywhere.
+
+**Project containment is the one exception**: it follows the running platform's default filesystem behavior, so it can be imprecise on a non-standard configuration. See the limitations.
+
 ## Audit log
 
 Decisions are written as JSON Lines to `~/.policygate/log/audit.log` by default. The newly created `log` directory uses mode `0700`, separating audit files from configuration and backups.
@@ -259,6 +273,7 @@ policygate version
 - Only Bash tool calls are covered. Other tools and direct file edits are not inspected.
 - An `ask` decision prompts for confirmation in Claude Code but is converted to `deny` in Codex, which does not support standalone confirmation from a PreToolUse hook. The same policy can therefore produce a prompt on Claude Code and a rejected command on Codex.
 - Regex and bounded shell analysis cannot fully handle obfuscation or unsupported syntax.
+- Deciding whether a path lies inside the project follows the running platform's default filesystem behavior. On a case-sensitive macOS volume, a separate directory differing only by case may be treated as inside the project; on a case-insensitive Linux mount, a path inside the project may be treated as outside it. Rule matching itself is unaffected by the former.
 - Git aliases are not resolved, so a push hidden behind one such as `git pushf` passes the protected-branch check. Resolving an alias requires reading `git config`, and an alias can itself be an arbitrary shell command (`!sh -c ...`). Pair this with branch protection on the remote when the rule must hold.
 - A command name produced by a variable or command substitution, such as `$CMD -rf /`, cannot be resolved during analysis.
 - Pipelines, subshells, and conditionals are not fully executed semantically; related commands are treated as indeterminate and evaluated conservatively.

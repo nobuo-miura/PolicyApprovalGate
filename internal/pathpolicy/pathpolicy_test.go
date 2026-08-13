@@ -3,6 +3,7 @@ package pathpolicy
 import (
 	"testing"
 
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
 
@@ -149,4 +150,33 @@ func FuzzClassifyDoesNotPanic(f *testing.F) {
 			_ = Classify(command)
 		}
 	})
+}
+
+// On a case-insensitive filesystem the hook's working directory and a command's
+// path argument can spell the same tree differently. Comparing them byte for
+// byte would place a project file outside its own project.
+func TestIsOutsideFollowsPlatformCaseRules(t *testing.T) {
+	const root = "/Users/user/Project"
+
+	if IsOutside(root, root) {
+		t.Errorf("the root is not outside itself")
+	}
+	if IsOutside(root, root+"/src/main.go") {
+		t.Errorf("an exact-case child was reported outside %q", root)
+	}
+
+	mixed := "/users/user/project/src/main.go"
+	if got := IsOutside(root, mixed); got == paths.FSIgnoresCase {
+		t.Errorf("IsOutside(%q, %q) = %v, want %v on this platform",
+			root, mixed, got, !paths.FSIgnoresCase)
+	}
+
+	// Folding case must not turn a prefix-sharing sibling into a child.
+	if !IsOutside(root, "/users/user/project-evil/x") {
+		t.Errorf("prefix-sharing sibling was reported inside %q", root)
+	}
+	// Nor may it swallow an unrelated tree of the same length.
+	if !IsOutside(root, "/Users/user/Другое/x") {
+		t.Errorf("unrelated path was reported inside %q", root)
+	}
 }

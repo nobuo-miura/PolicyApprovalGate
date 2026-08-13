@@ -17,6 +17,7 @@ import (
 	"github.com/nobuo-miura/policyapprovalgate/internal/gitpush"
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
 	"github.com/nobuo-miura/policyapprovalgate/internal/pathpolicy"
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
@@ -108,14 +109,10 @@ func runInit() int {
 		}
 		upgrade = true
 	}
-	path := os.Getenv("POLICYGATE_CONFIG")
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "policygate init: resolve home dir: %v\n", err)
-			return 1
-		}
-		path = filepath.Join(home, ".policygate", "config.yaml")
+	path, err := paths.ConfigTarget()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "policygate init: resolve home dir: %v\n", err)
+		return 1
 	}
 
 	if _, err := os.Stat(path); err == nil {
@@ -418,7 +415,7 @@ func nestedScriptGroups(subcmds []shellparse.Command, startCWD string, depth int
 	if depth >= maxNestedShellDepth {
 		return nil
 	}
-	home, _ := os.UserHomeDir()
+	home := paths.Home()
 	states, _ := pathpolicy.TrackCWD(subcmds, startCWD, home)
 	var out []nestedScriptGroup
 	for i, sc := range subcmds {
@@ -479,7 +476,7 @@ func checkCriticalDeletesContext(subcmds []shellparse.Command, startCWD string, 
 	if depth >= maxNestedShellDepth {
 		return true, "nested shell analysis depth exceeded while checking critical deletion"
 	}
-	home, _ := os.UserHomeDir()
+	home := paths.Home()
 	states, _ := pathpolicy.TrackCWD(subcmds, startCWD, home)
 	for i, original := range subcmds {
 		cmd := shellparse.Unwrap(original)
@@ -672,7 +669,7 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 		return "", "", ""
 	}
 
-	home, _ := os.UserHomeDir()
+	home := paths.Home()
 	root := cwd
 	if cfg.PathScope.ProjectRoot != "" && cfg.PathScope.ProjectRoot != "cwd" {
 		root = cfg.PathScope.ProjectRoot
@@ -794,32 +791,20 @@ func loadConfig() (*rules.Config, string, error) {
 	return cfg, "built-in default", nil
 }
 
+// configPath reports the configuration to load, or "" when the embedded
+// defaults apply. paths.ConfigSource documents why an explicitly selected file
+// skips the existence check.
 func configPath() string {
-	if p := os.Getenv("POLICYGATE_CONFIG"); p != "" {
-		return p
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	p := filepath.Join(home, ".policygate", "config.yaml")
-	if _, err := os.Stat(p); err != nil {
-		return ""
-	}
+	p, _ := paths.ConfigSource()
 	return p
 }
 
 func auditPath(cfg *rules.Config) string {
 	p := cfg.Audit.Path
 	if p == "" {
-		p = "~/.policygate/log/audit.log"
+		p = paths.DefaultAuditLog
 	}
-	if strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			p = filepath.Join(home, p[2:])
-		}
-	}
-	return p
+	return paths.Expand(p)
 }
 
 // resolveHost uses --host before POLICYGATE_HOST and never infers a host from payload data.

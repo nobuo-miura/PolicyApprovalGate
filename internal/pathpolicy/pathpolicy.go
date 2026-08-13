@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
 
@@ -657,13 +658,35 @@ func ResolvePhysical(path string) string {
 // IsOutside reports whether resolvedPath is outside resolvedRoot. Both
 // arguments are expected to already be clean, forward-slash paths, as
 // returned by ResolvePhysical.
+//
+// Where the filesystem ignores case, so does the comparison: on Windows a hook
+// reporting C:/Project and a command naming c:/project/src refer to the same
+// tree, and comparing them byte for byte would place the file outside its own
+// project.
 func IsOutside(resolvedRoot, resolvedPath string) bool {
 	if resolvedRoot == "" {
 		return true
 	}
 	root := strings.TrimSuffix(resolvedRoot, "/")
-	if resolvedPath == root || resolvedPath == resolvedRoot {
+	if samePath(resolvedPath, root) || samePath(resolvedPath, resolvedRoot) {
 		return false
 	}
-	return !strings.HasPrefix(resolvedPath, root+"/")
+	return !hasPathPrefix(resolvedPath, root+"/")
+}
+
+func samePath(a, b string) bool {
+	if paths.FSIgnoresCase {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// hasPathPrefix compares byte-for-byte lengths even when folding case. Simple
+// case folding can change a string's encoded length for a few exotic runes, so
+// such a path is reported as outside the root: the conservative answer.
+func hasPathPrefix(s, prefix string) bool {
+	if !paths.FSIgnoresCase {
+		return strings.HasPrefix(s, prefix)
+	}
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }

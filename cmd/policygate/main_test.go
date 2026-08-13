@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
@@ -349,6 +350,20 @@ func TestAuditPathUsesDedicatedLogDirectoryByDefault(t *testing.T) {
 	want := filepath.Join(home, ".policygate", "log", "audit.log")
 	if got := auditPath(cfg); got != want {
 		t.Errorf("auditPath() = %q, want %q", got, want)
+	}
+}
+
+// The audit location is spelled out in three places: the embedded default
+// policy, the upgrade migration in internal/rules, and paths.DefaultAuditLog.
+// They must agree, or an upgraded configuration would log somewhere the
+// fallback does not.
+func TestEmbeddedDefaultAuditPathMatchesPathsConstant(t *testing.T) {
+	cfg, err := rules.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audit.Path != paths.DefaultAuditLog {
+		t.Errorf("embedded default audit path = %q, want %q", cfg.Audit.Path, paths.DefaultAuditLog)
 	}
 }
 
