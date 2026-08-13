@@ -94,8 +94,11 @@ sensitive_paths:
     write: "deny"
     delete: "deny"
 
-# Always deny writes and deletions to matched paths. This is a soft guard;
-# place the binary and hook configuration in OS-protected locations as well.
+# Always deny writes and deletions to matched paths. This is a soft guard: it
+# depends on policygate being invoked at all, so pair it with the host's own
+# permission model rather than treating it as a boundary. The binary itself is
+# guarded structurally, whatever path it is installed to, and needs no entry
+# here; run `policygate doctor` to see the paths that covers.
 protected_paths:
   enabled: true
   patterns:

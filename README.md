@@ -19,6 +19,8 @@ The built-in rules are intended to reduce missed, clearly dangerous operations, 
 - Read / write / delete classification for path access
 - Policies for out-of-project, sensitive, and protected paths
 - Case-insensitive rule matching, so a filesystem that ignores case cannot be used to slip past a rule
+- Writes and deletes to its own executable denied structurally, wherever it is installed, with nothing to configure
+- Hook registration through `install-hook`: resolves the absolute path, idempotent, preserves existing settings
 - Path tracking that accounts for `cd` and symbolic links
 - Normalization for `env` / `command`, `git -C`, and `cp/install -t`
 - Analysis of statically quoted paths and critical deletes inside literal `sh/bash/zsh -c` and `eval` scripts
@@ -90,44 +92,38 @@ List-valued sections in a user configuration (`deny`, `ask`, `allow`, `sensitive
 
 ### 3. Register the hook
 
-#### Claude Code
+`install-hook` resolves its own absolute path and writes the registration, so there is no configuration file to edit by hand.
 
-Add the hook to `.claude/settings.json`. See [configs/claude-code.settings.example.json](configs/claude-code.settings.example.json) for the complete example.
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/local/bin/policygate --host claude"
-          }
-        ]
-      }
-    ]
-  }
-}
+```bash
+policygate install-hook --host claude   # ./.claude/settings.json
+policygate install-hook --host codex    # ~/.codex/config.toml
 ```
 
-#### Codex CLI
+| Flag | Purpose |
+| --- | --- |
+| `--user` | Register Claude Code in `~/.claude/settings.json` instead of the project's `.claude/settings.json` |
+| `--path PATH` | Name the file to register in |
+| `--dry-run` | Print what would be written without writing it |
 
-Add the hook to `~/.codex/config.toml`. See [configs/codex-config.example.toml](configs/codex-config.example.toml) for the complete example.
+Registration is idempotent and preserves existing settings. The file is backed up before it is replaced, and the replacement is atomic. Use `uninstall-hook` to remove it.
 
-```toml
-[[hooks.PreToolUse]]
-matcher = "^Bash$"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "/usr/local/bin/policygate --host codex"
+```bash
+policygate uninstall-hook --host claude
 ```
+
+The Codex registration is appended as a block delimited by marker comments, so nothing else in the file is touched. Claude Code's `settings.json` is read and rewritten as JSON; every key other than `hooks` keeps its value and its position, though indentation is normalized to two spaces.
 
 Codex hooks are enabled by default. `codex_hooks` is a deprecated alias; the canonical feature key is now `hooks`. See the [official Codex Hooks documentation](https://learn.chatgpt.com/docs/hooks) for details.
 
-After registering the hook, run `/hooks` in Codex, review the displayed command definition, and trust it. An untrusted or changed hook is skipped.
+**After registering the hook, run `/hooks` in Codex, review the displayed command definition, and trust it. An untrusted or changed hook is skipped.**
+
+#### Registering by hand
+
+See [configs/claude-code.settings.example.json](configs/claude-code.settings.example.json) and [configs/codex-config.example.toml](configs/codex-config.example.toml) for complete examples. Give `command` the absolute path to policygate. A `~` or `$HOME` is expanded only when the host runs the command through a shell, and an unexpanded value leaves the hook unable to run.
+
+**On Windows, separate the path with forward slashes** (`D:/bin/policygate.exe`). Backslashes break either way: inside a JSON string `\b` reads as a backspace, and a host that passes the command to a shell drops each backslash as an escape. Windows accepts forward slashes as path separators.
+
+`install-hook` resolves the path and its separators for you, so none of this applies when you use it.
 
 ## Host behavior
 
@@ -248,8 +244,10 @@ Redaction is not exhaustive and may over-redact ordinary text. Use `hash` or `no
 
 | Command | Description | Example use |
 | --- | --- | --- |
+| `policygate install-hook --host claude` | Resolves its own absolute path and registers it as a PreToolUse hook. Idempotent, and preserves existing settings. | On installation, and after the binary moves |
+| `policygate uninstall-hook --host claude` | Removes the registration, leaving other hooks alone. | When disabling it temporarily, or uninstalling |
 | `policygate check-config` | Loads the configuration file and validates its schema and values, printing any warnings or errors. | After creating or editing a configuration, before registering the hook |
-| `policygate doctor` | Prints the version, OS/architecture, binary path, host, and configuration load status. | When diagnosing installation or configuration problems |
+| `policygate doctor` | Prints the version, OS/architecture, binary path, the paths self-protection covers, host, and configuration load status. | When diagnosing installation or configuration problems |
 | `policygate evaluate --host codex --command 'rm -rf /'` | Evaluates a command against the current policy **without executing it**, then prints the result as JSON. | When checking defer / ask / deny behavior after changing rules |
 | `policygate observe --host codex` | Reads one PreToolUse JSON input from standard input and records the evaluation without blocking it. | When testing hook integration without enforcement |
 | `policygate version` | Prints the PolicyApprovalGate version. | When checking the installed version |

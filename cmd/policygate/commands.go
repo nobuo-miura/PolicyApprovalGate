@@ -132,6 +132,13 @@ func runDoctor(args []string) int {
 	if exe, err := os.Executable(); err == nil {
 		fmt.Printf("binary: %s\n", exe)
 	}
+	// Self-protection depends on resolving this process's own path, so report
+	// what it actually guards rather than leaving it to be assumed.
+	if guarded := selfPaths(); len(guarded) == 0 {
+		fmt.Println("self-protection: inactive (own path could not be resolved)")
+	} else {
+		fmt.Printf("self-protection: %s\n", strings.Join(guarded, ", "))
+	}
 	fmt.Printf("host: %s\n", resolveHost())
 	if failures != 0 {
 		return 1

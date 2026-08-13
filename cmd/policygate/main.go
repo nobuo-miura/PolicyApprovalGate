@@ -27,6 +27,10 @@ func main() {
 		switch os.Args[1] {
 		case "init":
 			os.Exit(runInit())
+		case "install-hook":
+			os.Exit(runInstallHook(os.Args[2:]))
+		case "uninstall-hook":
+			os.Exit(runUninstallHook(os.Args[2:]))
 		case "check-config":
 			os.Exit(runCheckConfig(os.Args[2:]))
 		case "doctor":
@@ -55,6 +59,10 @@ Usage:
   policygate [--host claude|codex]           Evaluate one PreToolUse payload from stdin
   policygate observe [--host claude|codex]   Record a decision without enforcing it
   policygate init [--upgrade]                Create or upgrade the user configuration
+  policygate install-hook --host claude|codex [--user] [--path PATH] [--dry-run]
+                                             Register this binary as a PreToolUse hook
+  policygate uninstall-hook --host claude|codex [--user] [--path PATH] [--dry-run]
+                                             Remove the registration
   policygate check-config [--config PATH]    Validate a configuration file
   policygate doctor                          Print version, host, and configuration status
   policygate evaluate --command CMD [--cwd DIR] [--host claude|codex]
@@ -282,12 +290,12 @@ func evaluate(cfg *rules.Config, in hook.Input, cmd string) (decision hook.Decis
 		}
 	}
 
-	if d, r, matched := strictestPathAccess(cfg, subcmds, in.CWD, nested); d != "" {
+	if d, r, src, matched := strictestPathAccess(cfg, subcmds, in.CWD, nested); d != "" {
 		switch d {
 		case "deny":
-			return hook.DecisionDeny, r, "path_policy", matched
+			return hook.DecisionDeny, r, src, matched
 		case "ask":
-			return hook.DecisionAsk, r, "path_policy", matched
+			return hook.DecisionAsk, r, src, matched
 		}
 	}
 
@@ -448,18 +456,18 @@ func parseNestedScript(cmd shellparse.Command) ([]shellparse.Command, bool) {
 
 // strictestPathAccess returns the strictest path decision across the command
 // itself and every literal script it reaches.
-func strictestPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string, nested []nestedScriptGroup) (decision, reason, matchedBy string) {
+func strictestPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string, nested []nestedScriptGroup) (decision, reason, source, matchedBy string) {
 	best := 0
-	consider := func(d, r, m string) {
+	consider := func(d, r, s, m string) {
 		if rank := decisionRank(d); rank > best {
-			best, decision, reason, matchedBy = rank, d, r, m
+			best, decision, reason, source, matchedBy = rank, d, r, s, m
 		}
 	}
 	consider(checkPathAccess(cfg, subcmds, cwd))
 	for _, group := range nested {
 		consider(checkPathAccess(cfg, group.commands, group.cwd))
 	}
-	return decision, reason, matchedBy
+	return decision, reason, source, matchedBy
 }
 
 // checkCriticalDeletes enforces a non-configurable baseline against recursively
@@ -664,9 +672,12 @@ func checkProtectedBranches(cfg *rules.Config, subcmds []shellparse.Command, cwd
 // checkPathAccess returns the strictest path-scope, sensitive-path, or
 // protected-path result across all simple commands. It tracks CWD changes and
 // both existing and pending symbolic links.
-func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string) (decision, reason, matchedBy string) {
-	if !cfg.PathScope.Enabled && !cfg.SensitivePaths.Enabled && !cfg.ProtectedPaths.Enabled {
-		return "", "", ""
+func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string) (decision, reason, source, matchedBy string) {
+	// Self-protection is structural and has no configuration to disable, so it
+	// keeps this function alive even when every configured path check is off.
+	self := selfPaths()
+	if !cfg.PathScope.Enabled && !cfg.SensitivePaths.Enabled && !cfg.ProtectedPaths.Enabled && len(self) == 0 {
+		return "", "", "", ""
 	}
 
 	home := paths.Home()
@@ -690,12 +701,22 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 		for _, acc := range pathpolicy.Classify(sc) {
 			indeterminate := acc.Indeterminate || state.Indeterminate
 
-			var pathCandidates []string
-			if cfg.SensitivePaths.Enabled || cfg.ProtectedPaths.Enabled {
-				pathCandidates = []string{acc.Path}
-				if !indeterminate {
-					rewritten := pathpolicy.RewriteThroughPending(pathpolicy.Resolve(state.Path, home, acc.Path), links)
-					pathCandidates = append(pathCandidates, pathpolicy.ResolvePhysical(rewritten))
+			// Always resolved: self-protection needs the candidates even when
+			// every configured path check is disabled.
+			pathCandidates := []string{acc.Path}
+			if !indeterminate {
+				rewritten := pathpolicy.RewriteThroughPending(pathpolicy.Resolve(state.Path, home, acc.Path), links)
+				pathCandidates = append(pathCandidates, pathpolicy.ResolvePhysical(rewritten))
+			}
+
+			if acc.Op == pathpolicy.OpWrite || acc.Op == pathpolicy.OpDelete {
+				if guarded := matchesSelf(self, pathCandidates); guarded != "" {
+					if rank := decisionRank("deny"); rank > best {
+						best = rank
+						decision, source = "deny", "self_protection"
+						reason = fmt.Sprintf("policygate's own executable (%s): %s", acc.Op, acc.Path)
+						matchedBy = guarded
+					}
 				}
 			}
 
@@ -704,7 +725,8 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 					d := cfg.SensitivePaths.Policy.For(string(acc.Op))
 					if rank := decisionRank(d); rank > best {
 						best = rank
-						decision, reason, matchedBy = d, fmt.Sprintf("%s (%s): %s", rule.Reason, acc.Op, acc.Path), rule.Pattern
+						decision, source, matchedBy = d, "path_policy", rule.Pattern
+						reason = fmt.Sprintf("%s (%s): %s", rule.Reason, acc.Op, acc.Path)
 					}
 				}
 			}
@@ -713,7 +735,8 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 				if rule := matchAny(cfg.MatchProtected, pathCandidates); rule != nil {
 					if rank := decisionRank("deny"); rank > best {
 						best = rank
-						decision, reason, matchedBy = "deny", fmt.Sprintf("protected path (%s): %s", acc.Op, acc.Path), rule.Pattern
+						decision, source, matchedBy = "deny", "path_policy", rule.Pattern
+						reason = fmt.Sprintf("protected path (%s): %s", acc.Op, acc.Path)
 					}
 				}
 			}
@@ -739,15 +762,16 @@ func checkPathAccess(cfg *rules.Config, subcmds []shellparse.Command, cwd string
 						reasonSuffix = "working directory could not be resolved, treated as " + reasonSuffix
 					}
 					best = rank
-					decision, reason, matchedBy = d, fmt.Sprintf("%s %s", acc.Op, reasonSuffix), ""
+					decision, source, matchedBy = d, "path_policy", ""
+					reason = fmt.Sprintf("%s %s", acc.Op, reasonSuffix)
 				}
 			}
 		}
 	}
 	if best == 0 {
-		return "", "", ""
+		return "", "", "", ""
 	}
-	return decision, reason, matchedBy
+	return decision, reason, source, matchedBy
 }
 
 func matchAny(match func(string) *rules.Rule, candidates []string) *rules.Rule {

@@ -19,6 +19,8 @@ Claude Code / Codex CLI がBashコマンドを実行する前に、ルールベ�
 - パスアクセスをread / write / deleteへ分類
 - プロジェクト外、機微パス、設定ファイルへのアクセスを制御
 - ファイルシステムの大文字小文字非区別を利用した回避を防ぐため、ルール照合は常に大文字小文字を区別しない
+- 配置場所によらず、自身の実行ファイルへの書き込みと削除を設定不要で常時拒否
+- `install-hook` によるhook登録の自動化（絶対パスの解決、冪等、既存設定の保持）
 - `cd` とシンボリックリンクを考慮したパス追跡
 - `env` / `command` wrapper、`git -C`、`cp/install -t`の正規化
 - 静的に確定できる引用符付きパスと、literalな`sh/bash/zsh -c`・`eval`内の致命的削除を解析
@@ -90,44 +92,38 @@ policygate check-config
 
 ### 3. ホストへ登録
 
-#### Claude Code
+`install-hook` が自身の絶対パスを解決して登録します。設定ファイルを手で編集する必要はありません。
 
-`.claude/settings.json` に登録します。完全な例は [configs/claude-code.settings.example.json](configs/claude-code.settings.example.json) を参照してください。
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/local/bin/policygate --host claude"
-          }
-        ]
-      }
-    ]
-  }
-}
+```bash
+policygate install-hook --host claude   # ./.claude/settings.json
+policygate install-hook --host codex    # ~/.codex/config.toml
 ```
 
-#### Codex CLI
+| フラグ | 説明 |
+| --- | --- |
+| `--user` | Claude Codeの登録先を `~/.claude/settings.json` にする（既定はプロジェクトの `.claude/settings.json`） |
+| `--path PATH` | 登録先ファイルを明示指定する |
+| `--dry-run` | 書き込まず、書き込む内容を表示する |
 
-`~/.codex/config.toml` に登録します。完全な例は [configs/codex-config.example.toml](configs/codex-config.example.toml) を参照してください。
+登録は冪等で、既存の設定は保持されます。書き込み前にバックアップを作成し、置き換えはアトミックに行います。解除は `uninstall-hook` です。
 
-```toml
-[[hooks.PreToolUse]]
-matcher = "^Bash$"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "/usr/local/bin/policygate --host codex"
+```bash
+policygate uninstall-hook --host claude
 ```
+
+Codexの登録はマーカーコメントで囲んだブロックとして追記されるため、同じファイルにある他の設定には触れません。Claude Codeの `settings.json` はJSONとして読み書きしますが、`hooks` 以外のキーとその順序は保持されます（インデントは2スペースに統一されます）。
 
 Codex hooksは既定で有効です。`codex_hooks` は非推奨の別名で、現在の正式な機能キーは `hooks` です。詳細は [Codex Hooks公式ドキュメント](https://learn.chatgpt.com/docs/hooks) を確認してください。
 
-登録後にCodexで`/hooks`を実行し、表示されたコマンド定義をreviewしてtrustしてください。未trustまたは変更後のhookは実行されません。
+**登録後にCodexで`/hooks`を実行し、表示されたコマンド定義をreviewしてtrustしてください。未trustまたは変更後のhookは実行されません。**
+
+#### 手動で登録する場合
+
+完全な例は [configs/claude-code.settings.example.json](configs/claude-code.settings.example.json) と [configs/codex-config.example.toml](configs/codex-config.example.toml) を参照してください。`command` にはpolicygateの絶対パスを記載します。`~` や `$HOME` は、ホストがコマンドをシェル経由で実行した場合にのみ展開されます。展開されないまま渡すとhookは動作しません。
+
+**Windowsではパス区切りにフォワードスラッシュを使ってください**（`D:/bin/policygate.exe`）。バックスラッシュは、JSON文字列では `\b` がバックスペースとして解釈され、ホストがコマンドをシェルに渡す場合はエスケープ文字として除去されるため、どちらの経路でも壊れます。Windowsはパス区切りとしてフォワードスラッシュを受け付けます。
+
+`install-hook` を使えば、パスの解決も区切り文字の変換も自動的に行われるため、これらの問題は起こりません。
 
 ## ホストごとの判定
 
@@ -248,8 +244,10 @@ allowルールは既知の低リスクコマンドを監査上分類するため
 
 | コマンド | コマンド説明 | 利用例 |
 | --- | --- | --- |
+| `policygate install-hook --host claude` | 自身の絶対パスを解決し、PreToolUse hookとして登録します。冪等で、既存の設定を保持します。 | 導入時、およびバイナリの移動後 |
+| `policygate uninstall-hook --host claude` | 登録を解除します。ほかのhookには触れません。 | 一時的に無効化するとき、アンインストール時 |
 | `policygate check-config` | 設定ファイルを読み込み、スキーマと設定値を検証します。警告またはエラーがあれば表示します。 | 設定の作成・編集後、hookへ登録する前 |
-| `policygate doctor` | バージョン、OS/アーキテクチャ、実行ファイルの場所、ホスト、設定ファイルの読込結果を表示します。 | インストールや設定の問題を切り分けるとき |
+| `policygate doctor` | バージョン、OS/アーキテクチャ、実行ファイルの場所、自己保護の対象パス、ホスト、設定ファイルの読込結果を表示します。 | インストールや設定の問題を切り分けるとき |
 | `policygate evaluate --host codex --command 'rm -rf /'` | 指定したコマンドを**実行せずに**現在のポリシーで判定し、結果をJSONで表示します。 | ルール変更後にdefer / ask / denyの結果を確認するとき |
 | `policygate observe --host codex` | PreToolUseのJSON入力を標準入力から1件受け取り、拒否せずに判定と監査記録だけを行います。 | hook連携をブロックなしで試すとき |
 | `policygate version` | PolicyApprovalGateのバージョンを表示します。 | 導入済みバージョンを確認するとき |
