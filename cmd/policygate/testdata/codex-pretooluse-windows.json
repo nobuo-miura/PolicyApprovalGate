@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture-codex",
+  "turn_id": "fixture-turn",
+  "transcript_path": "C:\\workspace\\rollout.jsonl",
+  "cwd": "C:\\workspace\\project",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {"command": "rm -rf /"},
+  "tool_use_id": "tool-fixture"
+}
