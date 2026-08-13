@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
 )
 
@@ -591,22 +592,58 @@ func makePendingSymlink(cur CWDState, home, source, linkPath string, pending []S
 // working directory); both are normalized to forward slashes before path,
 // which is always POSIX-style shell text, is resolved against them.
 func Resolve(cwd, home, path string) string {
+	return resolve(cwd, home, path, paths.FSDropsNameDecorations)
+}
+
+// resolve is Resolve with the host's name handling stated as an argument
+// instead of read from the platform, so both branches can be exercised from
+// any platform. A test that consulted runtime.GOOS would prove nothing on the
+// Mac and Linux runners this package is developed and merged on, which is
+// where a Windows-only path rule is most likely to rot unnoticed.
+//
+// dropNameDecorations belongs here rather than in the classifiers because the
+// spelling that reaches the path rules is decided here: this is the last point
+// at which `.env.` is still distinguishable from the `.env` Win32 will open.
+func resolve(cwd, home, path string, dropNameDecorations bool) string {
 	if path == "" {
 		return path
 	}
 	cwd = filepath.ToSlash(cwd)
 	home = filepath.ToSlash(home)
-	if (path == "~" || strings.HasPrefix(path, "~/")) && home != "" {
+	var resolved string
+	switch {
+	case (path == "~" || strings.HasPrefix(path, "~/")) && home != "":
 		// home is already a resolved, absolute location (posix or a native
 		// Windows path with a drive letter); posixpath.IsAbs cannot tell a
-		// drive-lettered path is absolute, so return directly instead of
+		// drive-lettered path is absolute, so join directly instead of
 		// re-running it through the absoluteness check below.
-		return posixpath.Clean(posixpath.Join(home, strings.TrimPrefix(path, "~")))
+		resolved = posixpath.Clean(posixpath.Join(home, strings.TrimPrefix(path, "~")))
+	case !isAbsPath(path):
+		resolved = posixpath.Clean(posixpath.Join(cwd, path))
+	default:
+		resolved = posixpath.Clean(path)
 	}
-	if !isAbsPath(path) {
-		path = posixpath.Join(cwd, path)
+	if dropNameDecorations {
+		resolved = trimWindowsNameDecorations(resolved)
 	}
-	return posixpath.Clean(path)
+	return resolved
+}
+
+// TrimHostNameDecorations removes what this host's filesystem ignores in a
+// name, and returns p untouched where those characters are significant.
+//
+// Resolve covers the paths it can place, but a path holding an unexpanded
+// variable is never resolved - it is matched as written - and `$D/.env.` would
+// otherwise reach the rules still wearing the dot that hides it.
+func TrimHostNameDecorations(p string) string {
+	return trimHostNameDecorations(p, paths.FSDropsNameDecorations)
+}
+
+func trimHostNameDecorations(p string, dropNameDecorations bool) string {
+	if !dropNameDecorations || p == "" {
+		return p
+	}
+	return trimWindowsNameDecorations(p)
 }
 
 // isAbsPath reports whether p is already an absolute location. p is

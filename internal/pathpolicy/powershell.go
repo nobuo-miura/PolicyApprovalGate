@@ -178,7 +178,15 @@ func trimWindowsNameDecorations(p string) string {
 	for len(parts) > 1 && parts[len(parts)-1] == "" {
 		parts = parts[:len(parts)-1]
 	}
-	return strings.Join(parts, "/")
+	trimmed := strings.Join(parts, "/")
+	// The root is separators and nothing else, so the loop above consumes it
+	// entirely. Returning the empty string for it would be worse than useless:
+	// the critical-delete check recognizes `rm -rf /` by comparing against "/",
+	// and a root that resolves to nothing matches nothing.
+	if trimmed == "" && p != "" {
+		return "/"
+	}
+	return trimmed
 }
 
 // stripDataStream cuts a file:stream suffix, leaving a drive specification

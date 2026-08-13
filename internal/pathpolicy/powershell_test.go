@@ -209,6 +209,12 @@ func TestNormalizeWindowsPathStripsWhatWin32Ignores(t *testing.T) {
 		{`C:project\.env`, "project/.env", "and keeps the rest of the name"},
 		{`./x`, "./x", "a relative marker must survive trimming"},
 		{`../x`, "../x", "and so must its parent form"},
+		// The root is separators and nothing else, so trimming empty components
+		// consumes all of it. The critical-delete check recognizes `rm -rf /` by
+		// comparing against "/", and a root that trims to "" matches nothing.
+		{`/`, "/", "the root must survive trimming"},
+		{`\`, "/", "including the backslash spelling"},
+		{`C:\`, "C:", "a drive root keeps its drive"},
 	}
 	for _, tc := range cases {
 		if got := NormalizeWindowsPath(tc.in); got != tc.want {

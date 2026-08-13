@@ -764,6 +764,11 @@ func checkPathAccess(cfg *rules.Config, accesses []trackedAccess, cwd string) (d
 			// Always resolved: self-protection needs the candidates even when
 			// every configured path check is disabled.
 			pathCandidates := []string{acc.Path}
+			// An unresolved path is only ever matched as written, so the
+			// spelling Win32 will actually open has to be offered too.
+			if trimmed := pathpolicy.TrimHostNameDecorations(acc.Path); trimmed != acc.Path {
+				pathCandidates = append(pathCandidates, trimmed)
+			}
 			if !indeterminate {
 				rewritten := pathpolicy.RewriteThroughPending(pathpolicy.Resolve(state.Path, home, acc.Path), links)
 				pathCandidates = append(pathCandidates, pathpolicy.ResolvePhysical(rewritten))

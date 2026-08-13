@@ -180,3 +180,100 @@ func TestIsOutsideOnAnUnprobeableRoot(t *testing.T) {
 		t.Errorf("unrelated path was reported inside %q", root)
 	}
 }
+
+// A POSIX command on Windows can still reach Win32, which drops a trailing dot
+// or space and reads a name:stream suffix as a stream of that same file. The
+// host's answer is passed in rather than read from runtime.GOOS so that both
+// branches are covered wherever the suite runs; a Windows-only assertion would
+// be silently vacuous on the Mac and Linux runners.
+func TestResolveDropsWin32NameDecorations(t *testing.T) {
+	const cwd = "/home/user/project"
+	const home = "/home/user"
+
+	cases := []struct {
+		name    string
+		path    string
+		windows string
+		posix   string
+	}{
+		{"trailing dot", ".env.", cwd + "/.env", cwd + "/.env."},
+		{"several trailing dots", ".env...", cwd + "/.env", cwd + "/.env..."},
+		{"trailing space", ".env ", cwd + "/.env", cwd + "/.env "},
+		{"dot and space", ".env. ", cwd + "/.env", cwd + "/.env. "},
+		{"explicitly relative", "./.env.", cwd + "/.env", cwd + "/.env."},
+		{"alternate data stream", ".env:hidden", cwd + "/.env", cwd + "/.env:hidden"},
+		{"default stream", ".env::$DATA", cwd + "/.env", cwd + "/.env::$DATA"},
+		{"under the home directory", "~/.ssh/id_rsa.", home + "/.ssh/id_rsa", home + "/.ssh/id_rsa."},
+		{"absolute", "/etc/passwd.", "/etc/passwd", "/etc/passwd."},
+		{"decorated parent", "sub./file", cwd + "/sub/file", cwd + "/sub./file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolve(cwd, home, tc.path, true); got != tc.windows {
+				t.Errorf("resolve(%q, windows) = %q, want %q", tc.path, got, tc.windows)
+			}
+			if got := resolve(cwd, home, tc.path, false); got != tc.posix {
+				t.Errorf("resolve(%q, posix) = %q, want %q", tc.path, got, tc.posix)
+			}
+		})
+	}
+}
+
+// Trimming must not consume a name outright, and the relative markers are names
+// of their own: turning `..` into an empty component would resolve a path to
+// somewhere the command never named.
+func TestResolveKeepsPathsThatAreOnlyDecoration(t *testing.T) {
+	const cwd = "/home/user/project"
+
+	cases := []struct{ path, want string }{
+		{"..", "/home/user"},
+		{"../.env", "/home/user/.env"},
+		{".", cwd},
+		{"...", cwd + "/..."},
+		{" ", cwd + "/ "},
+		{"", ""},
+		// The critical-delete check recognizes `rm -rf /` by comparing the
+		// resolved path against "/", so a root that trims to "" disarms it.
+		{"/", "/"},
+		{"/tmp/..", "/"},
+		{"../../../..", "/"},
+	}
+	for _, tc := range cases {
+		if got := resolve(cwd, "/home/user", tc.path, true); got != tc.want {
+			t.Errorf("resolve(%q, windows) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+// A path holding an unexpanded variable is never resolved, so the undecorated
+// spelling has to be reachable on its own.
+func TestTrimHostNameDecorations(t *testing.T) {
+	const decorated = "$DIR/.env."
+
+	if got := trimHostNameDecorations(decorated, true); got != "$DIR/.env" {
+		t.Errorf("trimHostNameDecorations(%q, windows) = %q, want %q", decorated, got, "$DIR/.env")
+	}
+	if got := trimHostNameDecorations(decorated, false); got != decorated {
+		t.Errorf("trimHostNameDecorations(%q, posix) = %q, want it unchanged", decorated, got)
+	}
+	if got := trimHostNameDecorations("", true); got != "" {
+		t.Errorf("trimHostNameDecorations(%q, windows) = %q, want it unchanged", "", got)
+	}
+}
+
+// The exported entry points must agree with the platform they were built for,
+// or the branch the suite exercises would not be the one that runs.
+func TestResolveMatchesThisPlatform(t *testing.T) {
+	got := Resolve("/home/user/project", "/home/user", ".env.")
+	want := "/home/user/project/.env."
+	if paths.FSDropsNameDecorations {
+		want = "/home/user/project/.env"
+	}
+	if got != want {
+		t.Errorf("Resolve(%q) = %q, want %q", ".env.", got, want)
+	}
+	if got := TrimHostNameDecorations("$DIR/.env."); (got == "$DIR/.env") != paths.FSDropsNameDecorations {
+		t.Errorf("TrimHostNameDecorations(%q) = %q, which disagrees with FSDropsNameDecorations=%v",
+			"$DIR/.env.", got, paths.FSDropsNameDecorations)
+	}
+}
