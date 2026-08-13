@@ -308,10 +308,20 @@ func TestHookCommandCarriesAConfigPath(t *testing.T) {
 		t.Errorf("namesPolicygate(%q) = false, want true", got)
 	}
 
-	// A path with a space is quoted, and the flag survives the quoting.
+	// A path with a space is quoted, and the flag survives the quoting. The
+	// quote character differs by platform, so assert that the value is quoted
+	// rather than which quote was used - pinning one makes the test pass on
+	// the platform it was written on and fail on the other.
 	spaced := hookCommand("/usr/local/bin/policygate", "claude", "/Users/a b/policy.yaml")
-	if !strings.Contains(spaced, "--config '/Users/a b/policy.yaml'") {
-		t.Errorf("hookCommand() = %q, want the policy path quoted", spaced)
+	_, value, ok := strings.Cut(spaced, "--config ")
+	if !ok {
+		t.Fatalf("hookCommand() = %q, want a --config flag", spaced)
+	}
+	if value == "" || (value[0] != '\'' && value[0] != '"') {
+		t.Errorf("hookCommand() = %q, want the policy path quoted so it stays one argument", spaced)
+	}
+	if !strings.Contains(value, "a b") {
+		t.Errorf("hookCommand() = %q, want the path itself preserved", spaced)
 	}
 }
 
