@@ -1,11 +1,29 @@
 # Add this example to ~/.codex/config.toml.
+#
+# `policygate install-hook --host codex` writes this for you, with the absolute
+# path of the binary already filled in. Register it by hand only if you need to.
+#
+# Replace the command path below with the absolute path to your own binary; the
+# installer places it in ~/.policygate/bin. A ~ or $HOME is expanded only when
+# the host runs the command through a shell, so spell the path out. On Windows,
+# separate it with forward slashes (D:/bin/policygate.exe).
+#
 # Hooks are enabled by default; codex_hooks is a deprecated alias.
 # Codex does not enforce standalone ask, so --host codex converts ask to deny.
 # Policygate never emits allow and therefore never bypasses normal approval.
+#
+# After registering, run /hooks in Codex and trust the definition. An untrusted
+# or changed hook is skipped without a word.
+#
+# Codex on Windows sends PowerShell for every command, which the default policy
+# asks about and Codex then rejects. Give it a policy of its own with
+# --config /absolute/path/.policygate/codex.yaml carrying unanalyzed_action:
+# defer. Do not wrap the command in /usr/bin/env: Windows has no such program,
+# the hook fails to start, and the command runs with the gate never consulted.
 
 [[hooks.PreToolUse]]
 matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "/usr/local/bin/policygate --host codex"
+command = "/home/you/.policygate/bin/policygate --host codex"

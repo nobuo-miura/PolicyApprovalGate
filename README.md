@@ -48,7 +48,7 @@ The fixture and golden tests use these host versions as their compatibility base
 The installer places the binary in `~/.policygate/bin`. **No elevation is needed**
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.sh
+curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/main/install.sh
 less install.sh   # read it before running it
 sh install.sh
 ```
@@ -56,7 +56,7 @@ sh install.sh
 Windows uses `install.ps1` the same way.
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.ps1 -OutFile install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/main/install.ps1 -OutFile install.ps1
 Get-Content install.ps1   # read it before running it
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```

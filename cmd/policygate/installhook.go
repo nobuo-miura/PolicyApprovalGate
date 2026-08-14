@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
+	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
 )
 
 // Registering the hook by hand means reading the binary's absolute path out of
@@ -99,6 +100,9 @@ func runHookRegistration(args []string, install bool) int {
 	}
 	command := hookCommand(exe, host, policy)
 	programNames := hookProgramNames(exe)
+	if install {
+		warnAboutPolicyFile(name, policy)
+	}
 
 	original, err := os.ReadFile(target)
 	switch {
@@ -160,6 +164,33 @@ func runHookRegistration(args []string, install bool) int {
 		fmt.Printf("policygate uninstall-hook: removed the policygate hook from %s\n", target)
 	}
 	return 0
+}
+
+// warnAboutPolicyFile reports a --config that will not load.
+//
+// The path is recorded as given; nothing here reads it at registration time.
+// An unreadable policy is not a hole - enforce mode denies the call rather than
+// falling back to the defaults - but the user finds that out one command at a
+// time, from a host reporting that everything is rejected. Saying so once, here,
+// is cheaper than that.
+func warnAboutPolicyFile(name, policy string) {
+	if warning := policyFileWarning(policy); warning != "" {
+		fmt.Fprintf(os.Stderr, "policygate %s: warning: %s\n", name, warning)
+	}
+}
+
+// policyFileWarning returns the complaint about a --config value, or "".
+func policyFileWarning(policy string) string {
+	if policy == "" {
+		return ""
+	}
+	if _, err := os.Stat(policy); err != nil {
+		return fmt.Sprintf("%s does not exist yet; until it does, enforce mode denies every command this hook sees", policy)
+	}
+	if _, err := rules.Load(policy); err != nil {
+		return fmt.Sprintf("%s cannot be loaded (%v); until it can, enforce mode denies every command this hook sees", policy, err)
+	}
+	return ""
 }
 
 func usageErrorf(name, format string, a ...any) int {

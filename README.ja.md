@@ -48,7 +48,7 @@ fixture / goldenテストは、2026-08-11時点で次のバージョンを基準
 インストーラは `~/.policygate/bin` へ配置します。**管理者権限は不要です。** 
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.sh
+curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/main/install.sh
 less install.sh   # 中身を読んでから実行してください
 sh install.sh
 ```
@@ -56,7 +56,7 @@ sh install.sh
 Windowsは `install.ps1` を同じ手順で使います。
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.ps1 -OutFile install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/main/install.ps1 -OutFile install.ps1
 Get-Content install.ps1   # 中身を読んでから実行してください
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/local/bin/policygate --host claude"
+            "command": "/home/you/.policygate/bin/policygate --host claude"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/local/bin/policygate --host claude"
+            "command": "/home/you/.policygate/bin/policygate --host claude"
           }
         ]
       }
