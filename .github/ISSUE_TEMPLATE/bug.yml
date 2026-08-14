@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a reproducible, non-sensitive defect
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Remove secrets, credentials, and sensitive local paths from all output. For a security-sensitive bypass, use the private reporting route in SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: PolicyApprovalGate version
+      description: Paste the output of `policygate version`.
+      placeholder: policygate v0.x.x
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste `policygate doctor` output after removing sensitive paths or other private data.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host
+      options:
+        - Claude Code
+        - Codex CLI
+        - Direct evaluate command
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Include the OS name, version, and architecture.
+      placeholder: Windows 11 24H2, amd64
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Provide a minimal, non-sensitive command that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: Expected decision
+      placeholder: deny, ask, or defer
+    validations:
+      required: true
+  - type: input
+    id: actual
+    attributes:
+      label: Actual decision
+      placeholder: deny, ask, defer, or an error
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Additional context
+      description: Include minimal reproduction steps and relevant sanitized configuration.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed secrets, credentials, and sensitive local paths from this report.
+          required: true
+        - label: This report does not describe a security-sensitive bypass that should be reported privately.
+          required: true

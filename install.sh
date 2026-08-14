@@ -68,17 +68,31 @@ Linux) OS="linux" ;;
 *) fail "unsupported operating system: $(uname -s). Windows uses install.ps1." ;;
 esac
 
-case "$(uname -m)" in
+MACHINE=$(uname -m)
+# Under Rosetta 2 a shell on Apple silicon reports itself as x86_64, which
+# describes the process rather than the machine. Following it would install an
+# emulated build on a native host.
+if [ "$OS" = "darwin" ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ]; then
+	MACHINE="arm64"
+fi
+
+case "$MACHINE" in
 x86_64 | amd64) ARCH="amd64" ;;
 arm64 | aarch64) ARCH="arm64" ;;
-*) fail "unsupported architecture: $(uname -m)" ;;
+*) fail "unsupported architecture: $MACHINE" ;;
 esac
 
 # Releases are published as pre-releases until v1.0, and the "latest" endpoint
 # does not report those - it answers 404 while every release is a pre-release.
 # Listing the releases and taking the newest covers both cases.
+#
+# The tr splits the response one field to a line before sed reads it. Without
+# that, a greedy .* run across a whole response reaches the *last* tag_name in
+# it, so a body that arrived unformatted would quietly install the oldest
+# release instead of the newest - a downgrade reported as a success.
 if [ -z "$VERSION" ]; then
 	VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases" |
+		tr ',' '\n' |
 		sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n 1)
 	[ -n "$VERSION" ] || fail "could not determine the newest release; pass --version"
 fi
@@ -135,8 +149,15 @@ echo "Then check the result:"
 echo
 echo "  $BIN doctor"
 
-case ":${PATH}:" in
-*":$INSTALL_DIR:"*) ;;
+# A trailing slash changes how the entry is written without changing where it
+# points, and comparing the two as written reports a directory as missing when
+# it is already there - sending the reader off to add it a second time. The
+# surrounding colons keep a longer neighbour such as .../bin2 from matching.
+WANT="${INSTALL_DIR%/}"
+HAVE=$(printf '%s' ":${PATH}:" | sed 's|/*:|:|g')
+
+case "$HAVE" in
+*":$WANT:"*) ;;
 *)
 	echo
 	echo "$INSTALL_DIR is not on your PATH. The hook runs by absolute path and"
