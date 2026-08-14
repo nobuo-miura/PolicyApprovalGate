@@ -1,0 +1,65 @@
+name: Rule proposal
+description: Propose a narrowly scoped deny or ask rule
+title: "[Rule]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe both dangerous matches and safe non-matches. Proposals without realistic false-positive examples are incomplete. Report security-sensitive bypasses privately as described in SECURITY.md.
+  - type: textarea
+    id: target
+    attributes:
+      label: Target command and risk
+      description: Identify the command family and explain the security property the rule should enforce.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: decision
+    attributes:
+      label: Proposed decision
+      options:
+        - deny
+        - ask
+    validations:
+      required: true
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: Shell dialect
+      options:
+        - POSIX shell
+        - PowerShell
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: matcher
+    attributes:
+      label: Proposed regular expression or matching approach
+      description: Explain why the matcher is no broader than necessary.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: positive
+    attributes:
+      label: Commands that must match
+      description: Provide representative positive test cases.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: false_positives
+    attributes:
+      label: Safe commands that must not match
+      description: Required. Provide realistic commands that could otherwise become false positives.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Link relevant documentation or explain known tradeoffs.

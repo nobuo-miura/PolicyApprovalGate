@@ -2,6 +2,11 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
+[![CI](https://github.com/nobuo-miura/PolicyApprovalGate/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nobuo-miura/PolicyApprovalGate/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/nobuo-miura/PolicyApprovalGate?include_prereleases)](https://github.com/nobuo-miura/PolicyApprovalGate/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/nobuo-miura/PolicyApprovalGate)](go.mod)
+[![License](https://img.shields.io/github/license/nobuo-miura/PolicyApprovalGate)](LICENSE)
+
 PolicyApprovalGate is a PreToolUse hook that checks shell commands against local rules before Claude Code or Codex CLI runs them.
 
 It detects dangerous commands, pushes to protected branches, and access to out-of-project or sensitive paths, then records the decision in an audit log. It does not use AI or an LLM, so the same input always produces the same result.
@@ -15,24 +20,21 @@ In this example, PolicyApprovalGate blocks Claude Code from reading `~/.ssh` and
 
 ## Features
 
-- Deterministic decisions based on regex rules and structural analysis
-- Always-on denial of recursive force-deletion targeting the filesystem root or current user's home
-- Controls for force pushes, deletion, and direct pushes to protected branches
-- Read / write / delete classification for file access
-- Policies for out-of-project paths, sensitive files, and PolicyApprovalGate's own configuration
-- Path tracking that accounts for `cd`, existing symlinks, and symlinks created in the same command
-- Normalization for `env` / `command` wrappers, `git -C`, `cp/install -t`, and related forms
-- Host-specific handling for Claude Code `ask` decisions and Codex deny conversion
-- PowerShell dialect detection, dangerous-command rules, and bounded path extraction on Windows
-- Audit log rotation, hashing, and secret redaction
-- CLI commands for configuration, upgrades, validation, diagnostics, and hook registration
+- Deterministic local decisions without AI or an LLM
+- Always-on protection against recursive force-deletion of the filesystem root or current user's home
+- Configurable command rules and controls for pushes to protected branches
+- Read, write, and delete policies for project boundaries, sensitive paths, and PolicyApprovalGate's own files
+- Path tracking for `cd`, wrappers, and symlinks, with bounded PowerShell path extraction on Windows
+- Host-specific handling of Claude Code `ask` decisions and Codex deny conversion
+- Auditing with rotation, hashing, and best-effort secret redaction, plus CLI-based configuration and hook management
 
-## Requirements
+## Supported environments
 
-- Go 1.26
 - Claude Code or Codex CLI with PreToolUse hooks
+- macOS or Linux for normal runtime support
+- Windows for experimental runtime support
 
-macOS and Linux are the normally supported runtime platforms. Windows is also built and unit-tested in CI, but remains experimental because PowerShell is not fully parsed. See [Windows and PowerShell](#windows-and-powershell) for details.
+Windows is built and unit-tested in CI, but remains experimental because PowerShell is not fully parsed. See [Windows and PowerShell](#windows-and-powershell) for details. Go 1.26 is required only when building from source.
 
 The fixture and golden tests use these host versions as their compatibility baseline as of August 11, 2026:
 
@@ -45,7 +47,7 @@ The fixture and golden tests use these host versions as their compatibility base
 
 ### 1. Install
 
-The installer places the binary in `~/.policygate/bin`. **No elevation is needed**
+The installer places the binary in `~/.policygate/bin`. **No elevation is needed.** It also creates the initial configuration.
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/main/install.sh
@@ -66,20 +68,31 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `--version TAG` / `-Version TAG` | Install a specific release (default: the newest published) |
 | `--dir PATH` / `-Dir PATH` | Install into this directory (default: `~/.policygate/bin`) |
 
-To build from source instead; tagged releases can also be installed through Go:
+To build the current checkout from source with Go 1.26:
 
 ```bash
 go build -o policygate ./cmd/policygate
+```
+
+Installation through Go is also available:
+
+```bash
 go install github.com/nobuo-miura/policyapprovalgate/cmd/policygate@latest
 ```
 
-### 2. Create a configuration
+`go install` does not apply the release workflow's version stamp, so `policygate version` reports `dev`. Prefer the release installer when you need a versioned release binary.
+
+The commands below assume that the installation directory is on `PATH`. Otherwise, use the absolute binary path printed by the installer, such as `~/.policygate/bin/policygate`.
+
+### 2. Review or create the configuration
+
+The installers run `policygate init` automatically. If you built from source or installed through Go, run it yourself:
 
 ```bash
 policygate init
 ```
 
-This creates `~/.policygate/config.yaml` by default and never overwrites an existing file. Set `POLICYGATE_CONFIG` to create it elsewhere.
+This creates `~/.policygate/config.yaml` by default and leaves an existing file unchanged. Set `POLICYGATE_CONFIG` before running it to create the file elsewhere. Review the generated policy before registering the hook.
 
 ### 3. Register the hook
 
@@ -181,7 +194,11 @@ policygate check-config --config /absolute/path/.policygate/codex.yaml
 `POLICYGATE_CONFIG` remains available, but `--config` takes precedence. Use `--config` when assigning a different policy to each hook.
 
 > [!WARNING]
-> Do not use `/usr/bin/env POLICYGATE_CONFIG=... policygate` on Windows. Windows has no `/usr/bin/env`, so the hook cannot start, and a failed hook does not stop the tool call. In a Codex CLI 0.147.0 test on Windows 11, the command ran without any PolicyApprovalGate audit record. `install-hook --config` starts PolicyApprovalGate directly and avoids this failure.
+> Do not use `/usr/bin/env POLICYGATE_CONFIG=... policygate` on Windows because `/usr/bin/env` is unavailable there.
+>
+> If the hook cannot start, the tool call may still continue. In a Codex CLI 0.147.0 test on Windows 11, the command ran without creating a PolicyApprovalGate audit record.
+>
+> Use `install-hook --config` to start PolicyApprovalGate directly with the intended configuration.
 
 Keep policy files under `.policygate` when possible so the built-in `protected_paths` rules cover them. If a policy must live elsewhere, add that path to `protected_paths.patterns`.
 
@@ -299,13 +316,24 @@ Complete manual examples are available for [Claude Code](configs/claude-code.set
 
 Running without arguments enters hook mode and reads one PreToolUse JSON payload from standard input. Unknown subcommands and flags exit with code 2.
 
+## Non-Goals
+
+PolicyApprovalGate intentionally does not aim to do the following:
+
+- **Replace a sandbox or permission model.** PolicyApprovalGate complements these safeguards; it is not a standalone last line of defense.
+- **Use AI or an LLM to make decisions.** All decisions are based on deterministic rules, ensuring that the same input produces the same result and that the reasoning can be audited later.
+- **Fully emulate a shell.** Because commands are evaluated without being executed, values that are known only at runtime cannot be handled by design.
+- **Detect every obfuscated command.** PolicyApprovalGate is designed to reduce mistakes and overlooked risks, not to prevent every deliberate bypass attempt.
+- **Monitor network traffic.** It inspects commands only when they are issued.
+- **Inspect non-shell tool calls** (currently). Support for tools such as Write and Edit may be considered in the future.
+
 ## Limitations
 
-- Only shell commands are inspected. Direct file edits and other tools are outside its scope.
-- Regex rules and bounded structural analysis cannot fully handle obfuscation or unsupported syntax.
-- PowerShell pipelines, variables, and relative paths after `Set-Location` cannot be tracked completely.
+Unlike the non-goals above, these are constraints of the current implementation.
+
+- Bounded parsing cannot resolve commands or paths produced at runtime through variables, command substitution, or unsupported syntax.
+- PowerShell pipelines, wildcard expansion, and relative paths after `Set-Location` cannot be tracked completely. See [Windows and PowerShell](#windows-and-powershell).
 - Git aliases are not resolved. Use remote branch protection when the rule must be enforced.
-- Command names produced through variable expansion or command substitution cannot be resolved statically.
 - Pipelines, subshells, and conditionals are not modeled with complete execution semantics.
 - A normal directory created earlier in the same chain does not exist during analysis, so a later `cd` may be treated as failed.
 - An invalid explicit policy returns deny, but hook-input, decision-output, or audit-log failures cannot always replace the host decision.
@@ -313,19 +341,11 @@ Running without arguments enters hook mode and reads one PreToolUse JSON payload
 
 ## Development
 
-```bash
-gofmt -w .
-go mod tidy -diff
-go vet ./...
-go test -race ./...
-golangci-lint run ./...
-go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-go build ./...
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, required checks, rule proposals, fuzz seeds, and pull request guidance.
 
 Lint configuration is in [.golangci.yml](.golangci.yml), and CI is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml). GitHub Actions are pinned to commit SHAs rather than tags.
 
-Pushing a `v*` tag runs the [release workflow](.github/workflows/release.yml), which builds amd64 and arm64 binaries for darwin, linux, and windows, generates `SHA256SUMS`, and publishes a pre-release.
+Pushing a `v*` tag runs the [release workflow](.github/workflows/release.yml), which builds amd64 and arm64 binaries for darwin, linux, and windows, generates `SHA256SUMS`, and publishes a pre-release. Maintainers use [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) as the publication gate.
 
 See [SECURITY.md](SECURITY.md) for private vulnerability-reporting instructions.
 

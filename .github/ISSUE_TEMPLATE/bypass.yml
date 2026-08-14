@@ -1,0 +1,69 @@
+name: Non-sensitive bypass report
+description: Report a classification gap that is safe to disclose publicly
+title: "[Bypass]: "
+labels: ["bug", "security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Stop before posting a security-sensitive bypass
+
+        If the bypass could have real security impact, report it privately through the GitHub Security Advisory route in SECURITY.md. Do not put exploit details, credentials, sensitive paths, or a harmful reproduction in this form. If you are unsure, use the private route.
+
+        Continue here only when the classification gap is non-sensitive and safe to disclose publicly.
+  - type: input
+    id: version
+    attributes:
+      label: PolicyApprovalGate version
+      description: Paste the output of `policygate version`.
+      placeholder: policygate v0.x.x
+    validations:
+      required: true
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: Shell dialect
+      options:
+        - POSIX shell
+        - PowerShell
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command that bypassed the expected decision
+      description: Use a minimal, harmless reproduction with no sensitive values.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: Expected decision
+      placeholder: deny or ask
+    validations:
+      required: true
+  - type: textarea
+    id: evaluate
+    attributes:
+      label: Evaluate output
+      description: Paste the sanitized output of `policygate evaluate --command '...'`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Expected impact
+      description: Explain what policy property is missed without including weaponized details.
+    validations:
+      required: true
+  - type: checkboxes
+    id: disclosure
+    attributes:
+      label: Disclosure confirmation
+      options:
+        - label: This report is safe to disclose publicly and contains no secrets, sensitive paths, or harmful exploit details.
+          required: true
+        - label: I understand that uncertain or security-sensitive bypasses must be reported privately through SECURITY.md.
+          required: true

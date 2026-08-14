@@ -2,6 +2,11 @@
 
 [English](README.md) | [日本語](README.ja.md)
 
+[![CI](https://github.com/nobuo-miura/PolicyApprovalGate/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nobuo-miura/PolicyApprovalGate/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/nobuo-miura/PolicyApprovalGate?include_prereleases)](https://github.com/nobuo-miura/PolicyApprovalGate/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/nobuo-miura/PolicyApprovalGate)](go.mod)
+[![License](https://img.shields.io/github/license/nobuo-miura/PolicyApprovalGate)](LICENSE)
+
 PolicyApprovalGateは、Claude CodeとCodex CLIがシェルコマンドを実行する前に、ローカルルールで内容を検査するPreToolUseフックです。
 
 危険なコマンド、保護ブランチへのpush、プロジェクト外や機微なパスへのアクセスを検出し、判定を監査ログへ記録します。判定にAIやLLMは使わないため、同じ入力には常に同じ結果を返します。
@@ -15,24 +20,21 @@ PolicyApprovalGateは、Claude CodeとCodex CLIがシェルコマンドを実行
 
 ## 主な機能
 
-- 正規表現と構造解析による決定論的な判定
-- rootや現在ユーザーのhomeに対する再帰的な強制削除を常時拒否
-- 保護ブランチへのforce push、削除、直接pushを制御
-- ファイルアクセスをread / write / deleteに分類
-- プロジェクト外、機微なパス、PolicyApprovalGate自身の設定を保護
-- `cd`、既存symlink、同じコマンド内で作られるsymlinkを考慮
-- `env` / `command` wrapper、`git -C`、`cp/install -t`などを正規化
-- Claude Codeの`ask`とCodexの`deny`変換をホスト別に処理
-- Windows PowerShellの方言判定、危険コマンド検出、限定的なパス抽出
-- ローテーション、ハッシュ記録、秘密情報のマスクに対応した監査ログ
-- 設定の初期化、更新、検証、診断、hook登録をCLIから実行
+- AIやLLMを使わない、ローカルでの決定論的な判定
+- ルートディレクトリや現在のユーザーのホームディレクトリに対する再帰的な強制削除を常時拒否
+- 設定可能なコマンドルールと、保護ブランチへのpush制御
+- プロジェクト内外、機微なパス、PolicyApprovalGate自身のファイルに対する読み取り・書き込み・削除ポリシー
+- `cd`、wrapper、symlinkを考慮したパス追跡と、Windows PowerShellからの限定的なパス抽出
+- Claude Codeの`ask`とCodexのdeny変換をホスト別に処理
+- ローテーション、ハッシュ記録、best-effortの機密情報マスキングに対応した監査と、CLIによる設定・hook管理
 
 ## 対応環境
 
-- Go 1.26
 - Claude CodeまたはCodex CLIのPreToolUse hooks
+- 通常サポート: macOS、Linux
+- 実験的サポート: Windows
 
-macOSとLinuxを通常のサポート対象としています。WindowsもCIでビルドと単体テストを行っていますが、PowerShellを完全には解析できないため実験的サポートです。詳しくは「[WindowsとPowerShell](#windowsとpowershell)」を参照してください。
+WindowsもCIでビルドと単体テストを行っていますが、PowerShellを完全には解析できないため実験的サポートです。詳しくは「[WindowsとPowerShell](#windowsとpowershell)」を参照してください。Go 1.26が必要なのは、ソースからビルドする場合だけです。
 
 fixture / goldenテストは、2026-08-11時点で次のバージョンを基準にしています。
 
@@ -45,7 +47,7 @@ fixture / goldenテストは、2026-08-11時点で次のバージョンを基準
 
 ### 1. インストール
 
-インストーラは `~/.policygate/bin` へ配置します。**管理者権限は不要です。**
+インストーラは`~/.policygate/bin`へ配置し、初期設定ファイルも作成します。**管理者権限は不要です。**
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/main/install.sh
@@ -66,20 +68,31 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `--version TAG` / `-Version TAG` | 特定のリリースを指定（既定は最新） |
 | `--dir PATH` / `-Dir PATH` | 配置先を指定（既定は `~/.policygate/bin`） |
 
-ソースからビルドする場合は次のとおりです。タグ付きリリースはGo経由でもインストールできます。
+現在のcheckoutをGo 1.26でビルドする場合は次のとおりです。
 
 ```bash
 go build -o policygate ./cmd/policygate
+```
+
+Go経由でもインストールできます。
+
+```bash
 go install github.com/nobuo-miura/policyapprovalgate/cmd/policygate@latest
 ```
 
-### 2. 設定ファイルを作成
+`go install`ではrelease workflowのversion情報が埋め込まれないため、`policygate version`は`dev`と表示されます。バージョン付きのrelease binaryが必要な場合は、release installerを使用してください。
+
+以降のコマンドは、配置先が`PATH`に含まれている前提です。含まれていない場合は、installerが表示した`~/.policygate/bin/policygate`などの絶対パスを使用してください。
+
+### 2. 設定ファイルを確認または作成
+
+installerは`policygate init`を自動実行します。ソースからbuildした場合やGo経由でinstallした場合は、自分で実行してください。
 
 ```bash
 policygate init
 ```
 
-既定では`~/.policygate/config.yaml`を作成します。既存ファイルは上書きしません。別の場所へ作成する場合は`POLICYGATE_CONFIG`を指定してください。
+既定では`~/.policygate/config.yaml`を作成し、既存ファイルは変更しません。別の場所へ作成する場合は、実行前に`POLICYGATE_CONFIG`を指定してください。hookへ登録する前に、生成されたpolicyを確認します。
 
 ### 3. ホストへ登録
 
@@ -181,7 +194,11 @@ policygate check-config --config /absolute/path/.policygate/codex.yaml
 `POLICYGATE_CONFIG`環境変数も利用できますが、`--config`が優先されます。フックごとに設定を分ける用途では`--config`を推奨します。
 
 > [!WARNING]
-> Windowsでは`/usr/bin/env POLICYGATE_CONFIG=... policygate`の形を使わないでください。`/usr/bin/env`が存在しないためhookを起動できず、失敗してもtool call自体は続行されます。Codex CLI 0.147.0 / Windows 11での実測でも、監査ログに何も残らないままコマンドが実行されました。`install-hook --config`ならpolicygateを直接起動できます。
+> Windowsには`/usr/bin/env`がないため、`/usr/bin/env POLICYGATE_CONFIG=... policygate`の形を使わないでください。
+>
+> hookを起動できなくてもtool callが続行される場合があります。Codex CLI 0.147.0 / Windows 11での実測では、PolicyApprovalGateの監査ログが作られないままコマンドが実行されました。
+>
+> `install-hook --config`を使うと、意図した設定でPolicyApprovalGateを直接起動できます。
 
 設定ファイルは、既定の`protected_paths`で保護される`.policygate`ディレクトリ内へ置くことを推奨します。別の場所へ置く場合は、そのパスを`protected_paths.patterns`へ追加してください。
 
@@ -299,13 +316,24 @@ hook登録では次のフラグを利用できます。
 
 引数なしで実行するとhookモードになり、標準入力からPreToolUse JSONを1件読み取ります。未知のサブコマンドやフラグはexit code 2で終了します。
 
+## 非目標
+
+PolicyApprovalGateは、次の用途を意図していません。
+
+- **サンドボックスや権限モデルの代替** — PolicyApprovalGateは、これらの仕組みを補完するためのものです。単独で最後の防御線として使用することは想定していません。
+- **AIやLLMを使った判定** — すべての判定を決定論的なルールに基づいて行い、同じ入力には常に同じ結果を返します。また、判定根拠を後から検証できることを重視しています。
+- **シェルの完全なエミュレーション** — コマンドを実行せずに判定するため、実行時に初めて確定する値は設計上扱えません。
+- **難読化されたコマンドの完全な検出** — あらゆる意図的な回避を防ぐものではなく、誤操作やリスクの見落としを減らすことを目的としています。
+- **ネットワーク通信の監視** — コマンドが発行された時点の内容だけを検査します。
+- **シェル以外のツール呼び出しの検査**（現時点） — WriteやEditなどのツールへの対応は、今後検討する可能性があります。
+
 ## 制限事項
 
-- シェルコマンドだけを検査します。直接のファイル編集やほかのツールは対象外です。
-- 正規表現と限定的な構造解析のため、難読化や未対応構文を完全には扱えません。
-- PowerShellではpipeline、変数、`Set-Location`後の相対パスなどを完全には追跡できません。
+非目標と異なり、次は現時点の実装上の制約です。
+
+- 限定的な構文解析のため、変数、コマンド置換、未対応構文によって実行時に生成されるコマンドやパスは確定できません。
+- PowerShellのpipeline、wildcard展開、`Set-Location`後の相対パスは完全には追跡できません。詳しくは「[WindowsとPowerShell](#windowsとpowershell)」を参照してください。
 - Git aliasは解決しません。保護ブランチを強制する場合は、リモート側のbranch protectionも使用してください。
-- 変数展開やコマンド置換で生成されるコマンド名は確定できません。
 - pipeline、subshell、条件分岐の完全な実行意味論はモデル化しません。
 - 同じチェーン内で新しく作る通常ディレクトリは解析時点に存在しないため、後続の`cd`を失敗とみなす場合があります。
 - 明示した設定ファイルが不正な場合はdenyを返しますが、hook入力、出力、監査ログ自体の障害では常にホスト判定を置き換えられるとは限りません。
@@ -313,19 +341,11 @@ hook登録では次のフラグを利用できます。
 
 ## 開発
 
-```bash
-gofmt -w .
-go mod tidy -diff
-go vet ./...
-go test -race ./...
-golangci-lint run ./...
-go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
-go build ./...
-```
+開発環境の準備、必須チェック、ルール提案、fuzz seed、Pull Requestの手順は[CONTRIBUTING.ja.md](CONTRIBUTING.ja.md)を参照してください。
 
 Lint設定は[.golangci.yml](.golangci.yml)、CIは[.github/workflows/ci.yml](.github/workflows/ci.yml)にあります。GitHub Actionsはtagではなくcommit SHAで固定しています。
 
-`v*`タグをpushすると[release workflow](.github/workflows/release.yml)がdarwin / linux / windows向けのamd64・arm64バイナリと`SHA256SUMS`を生成し、pre-releaseとして公開します。
+`v*`タグをpushすると[release workflow](.github/workflows/release.yml)がdarwin / linux / windows向けのamd64・arm64バイナリと`SHA256SUMS`を生成し、pre-releaseとして公開します。メンテナーは[RELEASE_CHECKLIST.ja.md](RELEASE_CHECKLIST.ja.md)を公開判定に使用します。
 
 脆弱性の非公開報告手順は[SECURITY.md](SECURITY.md)を参照してください。
 
