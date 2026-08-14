@@ -26,8 +26,14 @@ Set-StrictMode -Version Latest
 
 $Repo = 'nobuo-miura/PolicyApprovalGate'
 
+# Write-Error is a terminating error under the Stop preference set above, so the
+# caller would be shown a PowerShell stack frame - script name, line number,
+# CategoryInfo, FullyQualifiedErrorId - wrapped around the one line that matters,
+# and the exit below would never be reached. Writing to stderr directly keeps the
+# message to a line and the exit code to something a caller can test. An exit
+# still unwinds through the finally block that removes the download directory.
 function Fail($message) {
-    Write-Error "install.ps1: $message"
+    [Console]::Error.WriteLine("install.ps1: $message")
     exit 1
 }
 
@@ -39,10 +45,17 @@ try {
     # Newer runtimes negotiate this themselves and may not expose the property.
 }
 
-switch ($env:PROCESSOR_ARCHITECTURE) {
+# A 32-bit PowerShell running on 64-bit Windows describes itself as x86 and names
+# the real machine in PROCESSOR_ARCHITEW6432, which is unset anywhere else. Asking
+# only the first variable would refuse to install on a perfectly supported host.
+$Machine = $env:PROCESSOR_ARCHITEW6432
+if (-not $Machine) {
+    $Machine = $env:PROCESSOR_ARCHITECTURE
+}
+switch ($Machine) {
     'AMD64' { $Arch = 'amd64' }
     'ARM64' { $Arch = 'arm64' }
-    default { Fail "unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
+    default { Fail "unsupported architecture: $Machine" }
 }
 
 # Releases are published as pre-releases until v1.0, and the "latest" endpoint
@@ -113,14 +126,33 @@ try {
     # A running executable cannot be replaced in place on Windows, but it can be
     # renamed out of the way first.
     $target = Join-Path $Dir 'policygate.exe'
+    $old = "$target.old"
     if (Test-Path -LiteralPath $target) {
-        $old = "$target.old"
         Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
         Rename-Item -LiteralPath $target -NewName (Split-Path -Leaf $old) -Force
     }
     Move-Item -LiteralPath $unpacked -Destination $target -Force
+    # The displaced copy has done its job once the new binary is in place. It
+    # survives only while something is still running it, which is the one case
+    # where removing it cannot work and leaving it behind is the point.
+    Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
 
-    $installed = & $target version
+    # The binary is installed from here on, so reading its version back is a
+    # courtesy rather than a step: failing it would report an install that
+    # actually succeeded as a failure.
+    $installed = ''
+    try {
+        $installed = & $target version
+        if ($LASTEXITCODE -ne 0) {
+            $installed = ''
+        }
+    } catch {
+        # Under the Stop preference a native command can raise rather than
+        # return, and catching is the only way the check below is ever reached.
+    }
+    if (-not $installed) {
+        $installed = 'policygate'
+    }
     Write-Host "install.ps1: installed $installed to $target"
 
     & $target init
@@ -131,17 +163,34 @@ try {
     Write-Host ''
     Write-Host 'Next: register the hook with the host you use.'
     Write-Host ''
+    $codexConfig = Join-Path $env:USERPROFILE '.policygate\codex.yaml'
     Write-Host "  $target install-hook --host claude    # .\.claude\settings.local.json"
-    Write-Host "  $target install-hook --host codex     # ~\.codex\config.toml"
+    Write-Host "  $target install-hook --host codex --config $codexConfig"
     Write-Host ''
     Write-Host 'Claude Code reads its hook settings when a session starts, so restart it afterwards.'
     Write-Host 'Codex needs the definition trusted with /hooks, or the hook is skipped.'
+    Write-Host ''
+    Write-Host 'Codex sends PowerShell for every command and turns ask into deny, so it needs a'
+    Write-Host 'policy of its own or it rejects ordinary work. Write that file before registering'
+    Write-Host 'the hook - the path above is recorded as given, not checked:'
+    Write-Host ''
+    Write-Host "  config_version: 1"
+    Write-Host "  unknown:"
+    Write-Host "    unanalyzed_action: defer"
+    Write-Host "  parse_error:"
+    Write-Host "    unanalyzed_action: defer"
     Write-Host ''
     Write-Host 'Then check the result:'
     Write-Host ''
     Write-Host "  $target doctor"
 
-    $onPath = ($env:PATH -split ';') -contains $Dir
+    # PATH entries differ in trailing separator and in case without differing in
+    # meaning, and comparing them as written reports a directory as missing when
+    # it is already there - sending the reader off to add it a second time.
+    $entries = @($env:PATH -split ';' |
+        Where-Object { $_ } |
+        ForEach-Object { $_.TrimEnd('\') })
+    $onPath = $entries -contains $Dir.TrimEnd('\')
     if (-not $onPath) {
         Write-Host ''
         Write-Host "$Dir is not on your PATH. The hook runs by absolute path and works"
