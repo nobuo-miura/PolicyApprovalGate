@@ -528,3 +528,37 @@ func TestHookConfigPathDefaultsToTheLocalSettingsFile(t *testing.T) {
 		t.Errorf("hookConfigPath(claude, user) = %q, want ~/.claude/settings.json", got)
 	}
 }
+
+// A --config naming a file that will not load is not a hole - enforce mode
+// denies rather than falling back to the defaults - but the user otherwise
+// discovers it one rejected command at a time. Saying so once at registration
+// is cheaper than that.
+func TestWarnAboutPolicyFile(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "absent.yaml")
+	broken := filepath.Join(dir, "broken.yaml")
+	if err := os.WriteFile(broken, []byte("deny: [oops\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid := filepath.Join(dir, "valid.yaml")
+	if err := os.WriteFile(valid, []byte("config_version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		policy string
+		warn   bool
+	}{
+		{"no policy named", "", false},
+		{"missing file", missing, true},
+		{"unparseable file", broken, true},
+		{"valid file", valid, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := policyFileWarning(tc.policy); (got != "") != tc.warn {
+				t.Errorf("policyFileWarning(%q) = %q, want warning: %v", tc.policy, got, tc.warn)
+			}
+		})
+	}
+}
