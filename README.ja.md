@@ -43,16 +43,33 @@ fixture / goldenテストは、2026-08-11時点で次のバージョンを基準
 
 ## クイックスタート
 
-### 1. ビルドとインストール
+### 1. インストール
+
+インストーラは `~/.policygate/bin` へ配置します。**管理者権限は不要です。** 
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.sh
+less install.sh   # 中身を読んでから実行してください
+sh install.sh
+```
+
+Windowsは `install.ps1` を同じ手順で使います。
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.ps1 -OutFile install.ps1
+Get-Content install.ps1   # 中身を読んでから実行してください
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+| フラグ | 説明 |
+| --- | --- |
+| `--version TAG` / `-Version TAG` | 特定のリリースを指定（既定は最新） |
+| `--dir PATH` / `-Dir PATH` | 配置先を指定（既定は `~/.policygate/bin`） |
+
+ソースからビルドする場合は次のとおりです。タグ付きリリースはGo経由でもインストールできます。
 
 ```bash
 go build -o policygate ./cmd/policygate
-sudo install -m 0755 policygate /usr/local/bin/policygate
-```
-
-タグ付きリリースはGo経由でもインストールできます。
-
-```bash
 go install github.com/nobuo-miura/policyapprovalgate/cmd/policygate@latest
 ```
 
@@ -258,16 +275,16 @@ parse_error:
 
 ## CLIリファレンス
 
-| コマンド | 用途 |
-| --- | --- |
-| `policygate install-hook --host claude|codex` | PreToolUse hookとして登録 |
-| `policygate uninstall-hook --host claude|codex` | policygateの登録だけを解除 |
-| `policygate check-config` | 設定のスキーマと値を検証 |
-| `policygate doctor` | バージョン、OS、設定、登録、方言、自己保護を診断 |
-| `policygate evaluate --command CMD` | コマンドを実行せずに判定 |
-| `policygate observe` | 拒否せず、判定と監査記録だけを実行 |
-| `policygate version` | バージョンを表示 |
-| `policygate help` | ヘルプを表示 |
+| コマンド                                             | 用途 |
+|------------------------------------------------------| --- |
+| `policygate install-hook --host (claude or codex)`   | PreToolUse hookとして登録 |
+| `policygate uninstall-hook --host (claude or codex)` | policygateの登録だけを解除 |
+| `policygate check-config`                            | 設定のスキーマと値を検証 |
+| `policygate doctor`                                  | バージョン、OS、設定、登録、方言、自己保護を診断 |
+| `policygate evaluate --command CMD`                  | コマンドを実行せずに判定 |
+| `policygate observe`                                 | 拒否せず、判定と監査記録だけを実行 |
+| `policygate version`                                 | バージョンを表示 |
+| `policygate help`                                    | ヘルプを表示 |
 
 hook登録では次のフラグを利用できます。
 

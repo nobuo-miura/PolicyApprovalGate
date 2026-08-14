@@ -43,16 +43,33 @@ The fixture and golden tests use these host versions as their compatibility base
 
 ## Quick start
 
-### 1. Build and install
+### 1. Install
+
+The installer places the binary in `~/.policygate/bin`. **No elevation is needed**
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.sh
+less install.sh   # read it before running it
+sh install.sh
+```
+
+Windows uses `install.ps1` the same way.
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/develop/install.ps1 -OutFile install.ps1
+Get-Content install.ps1   # read it before running it
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+| Flag | Purpose |
+| --- | --- |
+| `--version TAG` / `-Version TAG` | Install a specific release (default: the newest published) |
+| `--dir PATH` / `-Dir PATH` | Install into this directory (default: `~/.policygate/bin`) |
+
+To build from source instead; tagged releases can also be installed through Go:
 
 ```bash
 go build -o policygate ./cmd/policygate
-sudo install -m 0755 policygate /usr/local/bin/policygate
-```
-
-Tagged releases can also be installed through Go:
-
-```bash
 go install github.com/nobuo-miura/policyapprovalgate/cmd/policygate@latest
 ```
 
@@ -260,8 +277,8 @@ Decisions are written as JSON Lines to `~/.policygate/log/audit.log` by default.
 
 | Command | Purpose |
 | --- | --- |
-| `policygate install-hook --host claude|codex` | Register a PreToolUse hook |
-| `policygate uninstall-hook --host claude|codex` | Remove only the PolicyApprovalGate registration |
+| `policygate install-hook --host (claude or codex)` | Register a PreToolUse hook |
+| `policygate uninstall-hook --host (claude or codex)` | Remove only the PolicyApprovalGate registration |
 | `policygate check-config` | Validate the configuration schema and values |
 | `policygate doctor` | Diagnose version, OS, configuration, registration, dialect, and self-protection |
 | `policygate evaluate --command CMD` | Evaluate a command without executing it |
