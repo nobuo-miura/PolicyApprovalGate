@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions and usage help
-    url: https://github.com/nobuo-miura/PolicyApprovalGate/discussions
+    url: https://github.com/nobuo-miura/PolicyApprovalGate/discussions/categories/q-a
     about: Ask usage and configuration questions in GitHub Discussions.
   - name: Private security report
     url: https://github.com/nobuo-miura/PolicyApprovalGate/security/advisories/new

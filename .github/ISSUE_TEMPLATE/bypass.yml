@@ -1,7 +1,7 @@
 name: Non-sensitive bypass report
 description: Report a classification gap that is safe to disclose publicly
 title: "[Bypass]: "
-labels: ["bug", "security"]
+labels: ["bug", "bypass"]
 body:
   - type: markdown
     attributes:
