@@ -45,7 +45,7 @@ fixture / goldenテストは、2026-08-11時点で次のバージョンを基準
 
 ### 1. インストール
 
-インストーラは `~/.policygate/bin` へ配置します。**管理者権限は不要です。** 
+インストーラは `~/.policygate/bin` へ配置します。**管理者権限は不要です。**
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/nobuo-miura/PolicyApprovalGate/main/install.sh
