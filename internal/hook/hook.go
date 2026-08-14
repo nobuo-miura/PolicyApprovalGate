@@ -20,9 +20,15 @@ type Input struct {
 	ToolUseID      string    `json:"tool_use_id"`
 }
 
-// ToolInput contains the Bash command being evaluated.
+// ToolInput contains whatever the tool being evaluated was handed: a shell
+// command, or the path of a file to read or change.
+//
+// Only one of the two is ever set. Which one is decided by the tool name
+// rather than by which field arrived, so a payload carrying both cannot pick
+// the analysis it would rather face.
 type ToolInput struct {
-	Command string `json:"command"`
+	Command  string `json:"command"`
+	FilePath string `json:"file_path"`
 }
 
 // ReadInput decodes a PreToolUse payload from r.

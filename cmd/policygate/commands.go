@@ -31,14 +31,23 @@ func runEvaluate(args []string) int {
 	fs := flag.NewFlagSet("evaluate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	command := fs.String("command", "", "shell command to evaluate")
+	filePath := fs.String("file-path", "", "file path to evaluate, as a Read, Write, or Edit tool would report it")
 	cwd := fs.String("cwd", "", "working directory used for path checks")
 	host := fs.String("host", "codex", "host behavior to apply (codex or claude)")
 	tool := fs.String("tool", "Bash", "tool name the host would report, which affects dialect detection")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *command == "" {
-		fmt.Fprintln(os.Stderr, "policygate evaluate: --command is required")
+	// The two describe different calls, and evaluate exists to predict what the
+	// hook would answer. Accepting both would mean answering about one of them
+	// without saying which.
+	if (*command == "") == (*filePath == "") {
+		fmt.Fprintln(os.Stderr, "policygate evaluate: pass exactly one of --command or --file-path")
+		return 2
+	}
+	fileOp, namesFileTool := fileToolOp(*tool)
+	if *filePath != "" && !namesFileTool {
+		fmt.Fprintf(os.Stderr, "policygate evaluate: --file-path needs a tool that is handed a path: --tool Read, Write, or Edit (got %q)\n", *tool)
 		return 2
 	}
 	if *cwd == "" {
@@ -54,10 +63,20 @@ func runEvaluate(args []string) int {
 		fmt.Fprintf(os.Stderr, "policygate evaluate: %v\n", err)
 		return 1
 	}
-	in := hook.Input{ToolName: *tool, CWD: *cwd, ToolInput: hook.ToolInput{Command: *command}}
-	shell := resolveDialect(*host, *tool)
-	warnOnDialectMismatch(shell, *command)
-	decision, reason, source, matchedBy := evaluate(cfg, in, *command, shell)
+	in := hook.Input{ToolName: *tool, CWD: *cwd, ToolInput: hook.ToolInput{Command: *command, FilePath: *filePath}}
+	var (
+		decision                  hook.Decision
+		reason, source, matchedBy string
+		shell                     dialect.Dialect
+	)
+	if *filePath != "" {
+		// A file tool has no shell language, matching what the hook records.
+		decision, reason, source, matchedBy = evaluateFileTool(cfg, in, *filePath, fileOp)
+	} else {
+		shell = resolveDialect(*host, *tool)
+		warnOnDialectMismatch(shell, *command)
+		decision, reason, source, matchedBy = evaluate(cfg, in, *command, shell)
+	}
 	decision, reason = finalizeForHost(*host, decision, reason)
 	out := evaluationOutput{decision, reason, source, matchedBy, string(shell)}
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {

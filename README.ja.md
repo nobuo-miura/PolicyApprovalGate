@@ -7,7 +7,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/nobuo-miura/PolicyApprovalGate)](go.mod)
 [![License](https://img.shields.io/github/license/nobuo-miura/PolicyApprovalGate)](LICENSE)
 
-PolicyApprovalGateは、Claude CodeとCodex CLIがシェルコマンドを実行する前に、ローカルルールで内容を検査するPreToolUseフックです。
+PolicyApprovalGateは、Claude CodeとCodex CLIがシェルコマンドを実行する前に、その内容をローカルルールで検査するPreToolUseフックです。Claude Codeでは、Read / Write / Editによる直接のファイル操作も検査します。
 
 危険なコマンド、保護ブランチへのpush、プロジェクト外や機微なパスへのアクセスを検出し、判定を監査ログへ記録します。判定にAIやLLMは使わないため、同じ入力には常に同じ結果を返します。
 
@@ -25,6 +25,8 @@ PolicyApprovalGateは、Claude CodeとCodex CLIがシェルコマンドを実行
 - 設定可能なコマンドルールと、保護ブランチへのpush制御
 - プロジェクト内外、機微なパス、PolicyApprovalGate自身のファイルに対する読み取り・書き込み・削除ポリシー
 - `cd`、wrapper、symlinkを考慮したパス追跡と、Windows PowerShellからの限定的なパス抽出
+- Claude CodeのRead / Write / Editにも、シェル経由の操作と同じパスポリシーを適用
+- Codexの`apply_patch`から変更対象のパスを抽出して検査
 - Claude Codeの`ask`とCodexのdeny変換をホスト別に処理
 - ローテーション、ハッシュ記録、best-effortの機密情報マスキングに対応した監査と、CLIによる設定・hook管理
 
@@ -134,6 +136,18 @@ PolicyApprovalGateは次の順でコマンドを確認します。
 7. `unknown.action`または`parse_error.action`
 
 明示的なdenyが最優先です。allowルールは監査ログ上の分類にだけ使われ、ホスト側の承認を省略しません。どのルールにも一致しない操作は、既定ではホスト本来の承認フローへ委ねます。
+
+### ファイル操作ツールとapply_patch
+
+Claude CodeのRead / Write / Editには、コマンド文字列ではなくファイルパスが渡されます。PolicyApprovalGateは、これらのツールに**パスに関するポリシーだけ**を適用します（`sensitive_paths`、`protected_paths`、`path_scope`、および自己保護）。コマンド用の`deny` / `ask` / `allow`ルールと`unknown.action`は適用しません。ファイル名をコマンド用の正規表現と照合すると、意図しない一致や、通常のファイル操作に対する過剰な確認が発生するためです。
+
+Codexには同名のツールがなく、ファイル編集には`apply_patch`が使われます。Codex CLI 0.147.0での実測では、`apply_patch`は`Bash`のシェルコマンドとしてhookへ渡されます。PolicyApprovalGateは、パッチ本文の`*** Add File:` / `*** Update File:` / `*** Delete File:` / `*** Move to:`から対象パスを抽出し、通常のコマンドルールとパスポリシーを適用します。
+
+heredocのようにパッチ本文がコマンド文字列に含まれていれば、標準入力で渡される形式でも検査できます。一方、別ファイルからのリダイレクトや動的生成などにより、変更対象のパスがhookへ届くコマンド文字列に含まれない場合、そのパスは検査できません。
+
+抽出したパスに`$`やバッククォートが含まれる場合は、実際にshellで展開されるかどうかにかかわらず、不定なパスとして安全側に判定します。現在の実装は、heredocの区切り文字や引数を囲む引用符までは解析しません。そのため、引用によって展開されないリテラルな`$`を含むファイル名も、プロジェクト外への操作と同じ扱いになります。
+
+パスポリシーの判定はシェル経由の操作と共通です。たとえば、`cat ~/.ssh/id_rsa`が機微パスとして確認を求める設定なら、Claude CodeのReadで同じファイルを開く場合も確認を求めます。
 
 ### ホストごとの違い
 
@@ -299,6 +313,7 @@ parse_error:
 | `policygate check-config`                            | 設定のスキーマと値を検証 |
 | `policygate doctor`                                  | バージョン、OS、設定、登録、方言、自己保護を診断 |
 | `policygate evaluate --command CMD`                  | コマンドを実行せずに判定 |
+| `policygate evaluate --tool Read\|Write\|Edit --file-path PATH` | ファイル操作を行わずにパスポリシーを判定 |
 | `policygate observe`                                 | 拒否せず、判定と監査記録だけを実行 |
 | `policygate version`                                 | バージョンを表示 |
 | `policygate help`                                    | ヘルプを表示 |
@@ -314,7 +329,7 @@ hook登録では次のフラグを利用できます。
 
 手動登録用の完全な例は[Claude Code設定例](configs/claude-code.settings.example.json)と[Codex設定例](configs/codex-config.example.toml)にあります。Windowsのパスは`D:/bin/policygate.exe`のようにフォワードスラッシュで記述してください。
 
-引数なしで実行するとhookモードになり、標準入力からPreToolUse JSONを1件読み取ります。未知のサブコマンドやフラグはexit code 2で終了します。
+引数なしで実行するとhookモードになり、標準入力からPreToolUse JSONを1件読み取ります。標準入力が端末の場合は入力を待たず、使い方を表示してexit code 2で終了します。未知のサブコマンドやフラグも同様にexit code 2です。
 
 ## 非目標
 
@@ -325,7 +340,7 @@ PolicyApprovalGateは、次の用途を意図していません。
 - **シェルの完全なエミュレーション** — コマンドを実行せずに判定するため、実行時に初めて確定する値は設計上扱えません。
 - **難読化されたコマンドの完全な検出** — あらゆる意図的な回避を防ぐものではなく、誤操作やリスクの見落としを減らすことを目的としています。
 - **ネットワーク通信の監視** — コマンドが発行された時点の内容だけを検査します。
-- **シェル以外のツール呼び出しの検査**（現時点） — WriteやEditなどのツールへの対応は、今後検討する可能性があります。
+- **すべてのツール呼び出しの検査** — 検査するのは両ホストのシェルコマンド（`apply_patch`を含む）と、Claude CodeのRead / Write / Editです。それ以外のツールは対象外で、対応範囲は実測で確認できたものだけを広げます。
 
 ## 制限事項
 
@@ -333,6 +348,7 @@ PolicyApprovalGateは、次の用途を意図していません。
 
 - 限定的な構文解析のため、変数、コマンド置換、未対応構文によって実行時に生成されるコマンドやパスは確定できません。
 - PowerShellのpipeline、wildcard展開、`Set-Location`後の相対パスは完全には追跡できません。詳しくは「[WindowsとPowerShell](#windowsとpowershell)」を参照してください。
+- `apply_patch`の変更対象が別ファイルや動的な入力にだけ含まれ、hookへ届くコマンド文字列に現れない場合、そのパスは検査できません。
 - Git aliasは解決しません。保護ブランチを強制する場合は、リモート側のbranch protectionも使用してください。
 - pipeline、subshell、条件分岐の完全な実行意味論はモデル化しません。
 - 同じチェーン内で新しく作る通常ディレクトリは解析時点に存在しないため、後続の`cd`を失敗とみなす場合があります。

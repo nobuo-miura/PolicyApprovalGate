@@ -131,6 +131,15 @@ func runHookRegistration(args []string, install bool) int {
 
 	if bytes.Equal(original, updated) {
 		fmt.Printf("policygate %s: %s is already up to date\n", name, target)
+		// Re-running this is how someone checks after an upgrade, and "up to
+		// date" on its own does not say what that covers.
+		if install && host == "claude" {
+			fmt.Printf("policygate %s: examining %s\n", name, strings.Join(claudeMatchers, ", "))
+			// This is the branch someone lands on when they re-run to check,
+			// which is exactly when a forgotten registration in the other
+			// scope needs saying.
+			reportOtherClaudeScope(name, target, override, programNames)
+		}
 		return 0
 	}
 	if dryRun {
@@ -157,7 +166,16 @@ func runHookRegistration(args []string, install bool) int {
 
 	if install {
 		fmt.Printf("policygate install-hook: registered %s in %s\n", command, target)
-		if host == "codex" {
+		switch host {
+		case "claude":
+			// Which tools were registered is the thing worth confirming: a
+			// registration that is missing one is indistinguishable from a
+			// complete one until something goes past unexamined. Naming them
+			// also makes an upgrade that adds a tool visible at the moment the
+			// user re-runs this.
+			fmt.Printf("policygate install-hook: examining %s\n", strings.Join(claudeMatchers, ", "))
+			reportOtherClaudeScope(name, target, override, programNames)
+		case "codex":
 			fmt.Println("policygate install-hook: run /hooks in Codex and trust the definition, or the hook is skipped")
 		}
 	} else {
@@ -562,14 +580,20 @@ func withoutPolicygateHooks(groups []json.RawMessage, programNames []string) ([]
 // withPolicygateHook appends the hook to an existing Bash matcher group when
 // there is one, so a user who already registered other Bash hooks keeps a
 // single group.
-// claudeMatchers are the tools that carry a shell command to evaluate.
+// claudeMatchers are the tools policygate examines: the two that carry a shell
+// command, and the three that are handed a path directly.
 //
-// PowerShell is listed separately rather than as an alternation such as
+// Each is listed separately rather than as an alternation such as
 // "Bash|PowerShell". A matcher that turns out to be compared literally rather
 // than as a regular expression would then match neither tool and disable the
-// hook outright, which is the one failure this must not risk. Two plain names
-// work under either reading.
-var claudeMatchers = []string{"Bash", "PowerShell"}
+// hook outright, which is the one failure this must not risk. Plain names work
+// under either reading.
+//
+// Read, Write and Edit reach the same files the shell does. Registering only
+// the shell tools left `cat ~/.ssh/id_rsa` asking while a Read of that file
+// passed, and a shell write to policygate's own configuration denied while a
+// Write of it went through.
+var claudeMatchers = []string{"Bash", "PowerShell", "Read", "Write", "Edit"}
 
 func withPolicygateHook(groups []json.RawMessage, command string) ([]json.RawMessage, error) {
 	entry := claudeHookEntry{Type: "command", Command: command}
@@ -832,6 +856,55 @@ func inspectClaudeRegistration(path string, programNames []string) hookRegistrat
 		}
 	}
 	return reg
+}
+
+// reportOtherClaudeScope names a registration in the scope that was not just
+// written to.
+//
+// Claude Code reads a project file and a user file, and install-hook writes one
+// of them. Reporting only what it wrote leaves a registration in the other
+// scope invisible - so an old one keeps running alongside the new one, and if
+// it predates a matcher it examines less while looking no different. Finding
+// that needed a doctor run nobody had a reason to make.
+//
+// An explicit --path means the caller chose the file outright; there is no
+// other scope to speak of.
+func otherClaudeScopeNotes(name, target, override string, programNames []string) []string {
+	var notes []string
+	if override != "" {
+		return nil
+	}
+	// The flag that reaches the other file depends on which scope it is, so it
+	// is derived here rather than written out - naming the wrong one would send
+	// the reader to edit the file they are already looking at.
+	for _, scope := range []struct{ user bool }{{false}, {true}} {
+		path, err := hookConfigPath("claude", scope.user, "")
+		if err != nil || path == target {
+			continue
+		}
+		reg := inspectClaudeRegistration(path, programNames)
+		if len(reg.matchers) == 0 {
+			continue
+		}
+		flag := ""
+		if scope.user {
+			flag = " --user"
+		}
+		notes = append(notes, fmt.Sprintf("policygate %s: also registered in %s for %s", name, reg.path, strings.Join(reg.matchers, ", ")))
+		if missing := reg.missing(); len(missing) > 0 {
+			notes = append(notes, fmt.Sprintf("policygate %s: that one does not examine %s", name, strings.Join(missing, ", ")))
+		}
+		notes = append(notes, fmt.Sprintf("policygate %s: update it with `policygate install-hook --host claude%s`, or remove it with `policygate uninstall-hook --host claude%s`",
+			name, flag, flag))
+	}
+	return notes
+}
+
+// reportOtherClaudeScope prints what otherClaudeScopeNotes found.
+func reportOtherClaudeScope(name, target, override string, programNames []string) {
+	for _, note := range otherClaudeScopeNotes(name, target, override, programNames) {
+		fmt.Println(note)
+	}
 }
 
 // claudeRegistrations reports the settings files a Claude Code hook can live in.

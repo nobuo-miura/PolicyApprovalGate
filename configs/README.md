@@ -16,7 +16,7 @@ Register by hand only if you need to, and then note:
 - **On Windows, use forward slashes** (`D:/bin/policygate.exe`). Inside a JSON
   string `\b` reads as a backspace, and a host that passes the command to a
   shell drops each backslash as an escape.
-- **Claude Code needs both matchers.** Its Windows build carries a `PowerShell`
-  tool alongside `Bash`, and a registration for `Bash` alone leaves that traffic
-  unexamined.
+- **Claude Code needs all five matchers.** `Bash` and `PowerShell` carry shell
+  commands. `Read`, `Write`, and `Edit` carry direct file paths. Leaving any of
+  them out creates a corresponding gap in path or command inspection.
 - **Codex needs the definition trusted** with `/hooks`, or the hook is skipped.

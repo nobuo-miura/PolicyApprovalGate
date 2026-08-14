@@ -1099,6 +1099,9 @@ func TestResolveCWDFallsBackToProcessWorkingDirectory(t *testing.T) {
 }
 
 func TestRunHookWithoutCWDReportsAnAbsoluteProjectRoot(t *testing.T) {
+	// No POLICYGATE_CONFIG is set here, so without this the run reads the
+	// developer's own policy and appends its deny to their real audit log.
+	isolateHome(t)
 	withArgs(t, "--host", "codex")
 	input := `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"touch /tmp/policygate-outside-target"}}`
 	var output bytes.Buffer

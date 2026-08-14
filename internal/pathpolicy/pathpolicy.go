@@ -98,6 +98,11 @@ func Classify(cmd shellparse.Command) []Access {
 		args = args[1:]
 	}
 
+	// The patch carries its own file list, so the arguments say nothing.
+	if isApplyPatch(name) {
+		return classifyApplyPatch(cmd.Raw)
+	}
+
 	switch {
 	case readOnly[name]:
 		for _, a := range args {

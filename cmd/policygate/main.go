@@ -69,8 +69,8 @@ Usage:
                                              Remove the registration
   policygate check-config [--config PATH]    Validate a configuration file
   policygate doctor                          Print version, host, and configuration status
-  policygate evaluate --command CMD [--cwd DIR] [--host claude|codex] [--tool NAME]
-                                             Evaluate a command without executing it
+  policygate evaluate (--command CMD | --file-path PATH) [--cwd DIR] [--host claude|codex] [--tool NAME]
+                                             Evaluate a command or a file access without performing it
   policygate version                         Print the version
   policygate help                            Print this message
 
@@ -178,7 +178,31 @@ func runInit() int {
 // run processes one hook call. Policy denials are emitted as hook output;
 // nonzero exit codes are reserved for failures to process the call itself.
 func run(observeOverride bool) int {
+	// Hook mode is the default, so `policygate` with no arguments waits on
+	// stdin - which, typed at a shell, looks like the program has hung. A host
+	// always pipes the payload in, so a terminal on stdin means a person is
+	// here and wants to know what to run.
+	if stdinIsTerminal(os.Stdin) {
+		fmt.Fprintln(os.Stderr, "policygate: hook mode reads one PreToolUse JSON payload from stdin, and stdin is a terminal.")
+		fmt.Fprintln(os.Stderr, "Run `policygate help` for the subcommands, or `policygate doctor` to check the setup.")
+		return 2
+	}
 	return runHook(os.Stdin, os.Stdout, observeOverride)
+}
+
+// stdinIsTerminal reports whether stdin is attached to a character device.
+//
+// A pipe, a file and a socket - everything a host uses to deliver the payload -
+// answer false, which is the direction that matters: a hook call must never be
+// refused because of this check. A character device that is not a terminal,
+// /dev/null being the one in practice, does answer true; a host wiring the hook
+// to /dev/null already has no gate, and saying so beats deferring in silence.
+func stdinIsTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
@@ -192,12 +216,27 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 	}
 
 	cmd := strings.TrimSpace(in.ToolInput.Command)
-	if !carriesShellCommand(in.ToolName) || cmd == "" {
+	filePath := strings.TrimSpace(in.ToolInput.FilePath)
+	fileOp, namesFileTool := fileToolOp(in.ToolName)
+
+	// The tool name decides which analysis runs, so a payload carrying both a
+	// command and a path cannot choose the one it would rather be read as.
+	shellCommand := carriesShellCommand(in.ToolName) && cmd != ""
+	fileAccess := !shellCommand && namesFileTool && filePath != ""
+	if !shellCommand && !fileAccess {
 		return 0
 	}
+
 	in.CWD = resolveCWD(in.CWD)
-	shell := resolveDialect(host, in.ToolName)
-	warnOnDialectMismatch(shell, cmd)
+
+	// A file tool carries no shell language. Leaving the dialect empty keeps it
+	// out of the audit log, because naming one would suggest an analysis that
+	// never ran.
+	var shell dialect.Dialect
+	if shellCommand {
+		shell = resolveDialect(host, in.ToolName)
+		warnOnDialectMismatch(shell, cmd)
+	}
 	if configErr != nil {
 		reason := "policy configuration could not be loaded: " + configErr.Error()
 		warnf("%s", reason)
@@ -209,7 +248,18 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 		return 0
 	}
 
-	decision, reason, source, matchedBy := evaluate(cfg, in, cmd, shell)
+	// subject is what the decision was about, and what the audit log records.
+	subject := cmd
+	var (
+		decision                  hook.Decision
+		reason, source, matchedBy string
+	)
+	if fileAccess {
+		subject = filePath
+		decision, reason, source, matchedBy = evaluateFileTool(cfg, in, filePath, fileOp)
+	} else {
+		decision, reason, source, matchedBy = evaluate(cfg, in, cmd, shell)
+	}
 	decision, reason = finalizeForHost(host, decision, reason)
 	predictedDecision := decision
 	observe := observeOverride || cfg.Mode == "observe"
@@ -222,7 +272,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 	}
 
 	if cfg.Audit.Enabled {
-		loggedCmd := auditCommand(cfg.Audit.CommandMode, cmd)
+		loggedCmd := auditCommand(cfg.Audit.CommandMode, subject)
 		rec := audit.Record{
 			Time:      time.Now(),
 			ToolName:  in.ToolName,
