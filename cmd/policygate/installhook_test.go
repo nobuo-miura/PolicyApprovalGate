@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -399,9 +400,17 @@ func TestInspectClaudeRegistrationFindsAStaleMatcherSet(t *testing.T) {
 	if len(reg.matchers) != 1 || reg.matchers[0] != "Bash" {
 		t.Fatalf("matchers = %v, want just Bash", reg.matchers)
 	}
+	// Derived from claudeMatchers rather than written out, so adding a tool to
+	// the registration does not break a test that is about staleness.
+	var want []string
+	for _, m := range claudeMatchers {
+		if m != "Bash" {
+			want = append(want, m)
+		}
+	}
 	missing := reg.missing()
-	if len(missing) != 1 || missing[0] != "PowerShell" {
-		t.Errorf("missing() = %v, want PowerShell", missing)
+	if !slices.Equal(missing, want) {
+		t.Errorf("missing() = %v, want %v", missing, want)
 	}
 }
 

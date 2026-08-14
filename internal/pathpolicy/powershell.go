@@ -92,6 +92,14 @@ func ClassifyPowerShell(command string) []Access {
 			continue
 		}
 
+		// Codex runs apply_patch through whatever shell it has, so the same
+		// patch reaches this analysis on Windows. The markers are the patch
+		// format's, not the shell's, and read the same either way.
+		if isApplyPatch(name) {
+			out = append(out, classifyApplyPatch(segment)...)
+			continue
+		}
+
 		op, ok := powerShellOp(name)
 		if !ok {
 			continue

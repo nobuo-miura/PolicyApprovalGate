@@ -7,7 +7,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/nobuo-miura/PolicyApprovalGate)](go.mod)
 [![License](https://img.shields.io/github/license/nobuo-miura/PolicyApprovalGate)](LICENSE)
 
-PolicyApprovalGate is a PreToolUse hook that checks shell commands against local rules before Claude Code or Codex CLI runs them.
+PolicyApprovalGate is a PreToolUse hook that checks shell commands against local rules before Claude Code or Codex CLI runs them. On Claude Code, it also checks direct file access through Read, Write, and Edit.
 
 It detects dangerous commands, pushes to protected branches, and access to out-of-project or sensitive paths, then records the decision in an audit log. It does not use AI or an LLM, so the same input always produces the same result.
 
@@ -25,6 +25,8 @@ In this example, PolicyApprovalGate blocks Claude Code from reading `~/.ssh` and
 - Configurable command rules and controls for pushes to protected branches
 - Read, write, and delete policies for project boundaries, sensitive paths, and PolicyApprovalGate's own files
 - Path tracking for `cd`, wrappers, and symlinks, with bounded PowerShell path extraction on Windows
+- The same path policy applied to Claude Code's Read, Write, and Edit tools
+- Target-path extraction and policy checks for Codex `apply_patch` calls
 - Host-specific handling of Claude Code `ask` decisions and Codex deny conversion
 - Auditing with rotation, hashing, and best-effort secret redaction, plus CLI-based configuration and hook management
 
@@ -134,6 +136,18 @@ PolicyApprovalGate evaluates a command in this order:
 7. `unknown.action` or `parse_error.action`
 
 An explicit deny always wins. Allow rules only classify audit records; they never bypass host approval. By default, operations that match no rule are delegated to the host's normal approval flow.
+
+### File tools and apply_patch
+
+Claude Code passes a file path, rather than command text, to its Read, Write, and Edit tools. PolicyApprovalGate applies only the path policies to these tools: `sensitive_paths`, `protected_paths`, `path_scope`, and self-protection. Command-oriented `deny`, `ask`, and `allow` rules and `unknown.action` do not apply. Matching filenames against command patterns would cause unintended matches and unnecessary prompts for ordinary file operations.
+
+Codex has no tools by those names; it edits files with `apply_patch`. In measurements with Codex CLI 0.147.0, `apply_patch` reaches the hook as a `Bash` shell command. PolicyApprovalGate extracts target paths from `*** Add File:`, `*** Update File:`, `*** Delete File:`, and `*** Move to:` markers, then applies the normal command rules and path policies.
+
+A heredoc is inspectable because its patch body remains in the command string even though the shell delivers it through standard input. If the target paths exist only in a redirected file or dynamically generated input and do not appear in the command string received by the hook, PolicyApprovalGate cannot inspect them.
+
+An extracted path containing `$` or a backtick is conservatively treated as unresolved whether or not the shell would expand it. The current implementation does not analyze heredoc-delimiter quoting or the quotes surrounding a patch argument. A filename containing a literal, non-expanding `$` is therefore handled the same way as an operation outside the project.
+
+Path-policy decisions are shared with shell analysis. For example, if the policy asks before `cat ~/.ssh/id_rsa` because it is a sensitive path, Claude Code's Read of the same file asks too.
 
 ### Host differences
 
@@ -299,6 +313,7 @@ Decisions are written as JSON Lines to `~/.policygate/log/audit.log` by default.
 | `policygate check-config` | Validate the configuration schema and values |
 | `policygate doctor` | Diagnose version, OS, configuration, registration, dialect, and self-protection |
 | `policygate evaluate --command CMD` | Evaluate a command without executing it |
+| `policygate evaluate --tool Read\|Write\|Edit --file-path PATH` | Evaluate path policy without accessing the file |
 | `policygate observe` | Record decisions without blocking |
 | `policygate version` | Print the version |
 | `policygate help` | Print help |
@@ -314,7 +329,7 @@ Hook registration supports these flags:
 
 Complete manual examples are available for [Claude Code](configs/claude-code.settings.example.json) and [Codex](configs/codex-config.example.toml). Write Windows paths with forward slashes, as in `D:/bin/policygate.exe`.
 
-Running without arguments enters hook mode and reads one PreToolUse JSON payload from standard input. Unknown subcommands and flags exit with code 2.
+Running without arguments enters hook mode and reads one PreToolUse JSON payload from standard input. When standard input is a terminal it does not wait: it prints what to run instead and exits with code 2, as unknown subcommands and flags do.
 
 ## Non-Goals
 
@@ -325,7 +340,7 @@ PolicyApprovalGate intentionally does not aim to do the following:
 - **Fully emulate a shell.** Because commands are evaluated without being executed, values that are known only at runtime cannot be handled by design.
 - **Detect every obfuscated command.** PolicyApprovalGate is designed to reduce mistakes and overlooked risks, not to prevent every deliberate bypass attempt.
 - **Monitor network traffic.** It inspects commands only when they are issued.
-- **Inspect non-shell tool calls** (currently). Support for tools such as Write and Edit may be considered in the future.
+- **Inspect every tool call.** PolicyApprovalGate inspects shell commands on both hosts, `apply_patch` among them, and Claude Code's Read, Write, and Edit tools. Other calls are out of scope, and coverage grows only after behavior has been measured against a real host.
 
 ## Limitations
 
@@ -333,6 +348,7 @@ Unlike the non-goals above, these are constraints of the current implementation.
 
 - Bounded parsing cannot resolve commands or paths produced at runtime through variables, command substitution, or unsupported syntax.
 - PowerShell pipelines, wildcard expansion, and relative paths after `Set-Location` cannot be tracked completely. See [Windows and PowerShell](#windows-and-powershell).
+- If an `apply_patch` target appears only in a separate file or dynamically generated input, and not in the command string received by the hook, its path cannot be inspected.
 - Git aliases are not resolved. Use remote branch protection when the rule must be enforced.
 - Pipelines, subshells, and conditionals are not modeled with complete execution semantics.
 - A normal directory created earlier in the same chain does not exist during analysis, so a later `cd` may be treated as failed.

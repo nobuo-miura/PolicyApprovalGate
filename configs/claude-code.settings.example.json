@@ -18,6 +18,33 @@
             "command": "/home/you/.policygate/bin/policygate --host claude"
           }
         ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/you/.policygate/bin/policygate --host claude"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/you/.policygate/bin/policygate --host claude"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/you/.policygate/bin/policygate --host claude"
+          }
+        ]
       }
     ]
   }
