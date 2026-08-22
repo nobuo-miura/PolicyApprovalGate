@@ -82,16 +82,15 @@ arm64 | aarch64) ARCH="arm64" ;;
 *) fail "unsupported architecture: $MACHINE" ;;
 esac
 
-# Releases are published as pre-releases until v1.0, and the "latest" endpoint
-# does not report those - it answers 404 while every release is a pre-release.
-# Listing the releases and taking the newest covers both cases.
+# Releases are drafted first and published by hand once checked, so "latest"
+# always answers with a real, reviewed release - never a draft in progress.
 #
 # The tr splits the response one field to a line before sed reads it. Without
 # that, a greedy .* run across a whole response reaches the *last* tag_name in
 # it, so a body that arrived unformatted would quietly install the oldest
 # release instead of the newest - a downgrade reported as a success.
 if [ -z "$VERSION" ]; then
-	VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases" |
+	VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" |
 		tr ',' '\n' |
 		sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n 1)
 	[ -n "$VERSION" ] || fail "could not determine the newest release; pass --version"

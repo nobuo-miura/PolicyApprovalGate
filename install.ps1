@@ -58,22 +58,15 @@ switch ($Machine) {
     default { Fail "unsupported architecture: $Machine" }
 }
 
-# Releases are published as pre-releases until v1.0, and the "latest" endpoint
-# does not report those - it answers 404 while every release is a pre-release.
-# Listing the releases and taking the newest covers both cases.
+# Releases are drafted first and published by hand once checked, so "latest"
+# always answers with a real, reviewed release - never a draft in progress.
 if (-not $Version) {
     try {
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -UseBasicParsing
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
     } catch {
-        Fail "could not list releases: $($_.Exception.Message)"
+        Fail "could not determine the newest release: $($_.Exception.Message)"
     }
-    # Force an array: a single release comes back as a bare object, and reading
-    # .Count off one is an error under Set-StrictMode.
-    $releases = @($releases)
-    if ($releases.Count -eq 0) {
-        Fail 'no releases were found; pass -Version'
-    }
-    $Version = $releases[0].tag_name
+    $Version = $release.tag_name
 }
 
 $Name = "policygate_${Version}_windows_${Arch}.zip"
