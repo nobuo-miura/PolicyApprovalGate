@@ -66,16 +66,16 @@ jobs:
           (cd dist && sha256sum ./* > SHA256SUMS)
           cat dist/SHA256SUMS
 
-      - name: Publish pre-release
+      - name: Publish release draft
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Published as a pre-release until compatibility is validated with
-          # real hosts.
+          # Published as a draft so a maintainer can review and publish it
+          # manually.
           gh release create "$VERSION" dist/* \
-            --prerelease \
+            --draft \
             --title "$VERSION" \
             --generate-notes \
             --notes "Verify a downloaded archive against \`SHA256SUMS\` before installing. Built for darwin, linux, and windows on amd64 and arm64; windows support is experimental."
