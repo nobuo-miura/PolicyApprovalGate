@@ -294,6 +294,7 @@ parse_error:
 
 既定では`~/.policygate/log/audit.log`へJSON Lines形式で記録します。
 
+- 各レコードには、判定の根拠となったホスト（`--host` / `POLICYGATE_HOST`）が`host`フィールドで記録されます（`claude` / `codex` など。宣言がなければ空）
 - 新規ディレクトリは`0700`、新規ログファイルは`0600`
 - 既存ディレクトリの権限は変更しない
 - symlink、FIFO、デバイスなどの非通常ファイルを拒否

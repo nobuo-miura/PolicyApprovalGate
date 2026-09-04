@@ -276,6 +276,7 @@ func runHook(stdin io.Reader, stdout io.Writer, observeOverride bool) int {
 		rec := audit.Record{
 			Time:      time.Now(),
 			ToolName:  in.ToolName,
+			Host:      host,
 			CWD:       in.CWD,
 			Command:   loggedCmd,
 			Source:    source,

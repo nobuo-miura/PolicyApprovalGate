@@ -13,14 +13,20 @@ import (
 
 // Record is one audit-log entry.
 type Record struct {
-	Time      time.Time `json:"time"`
-	ToolName  string    `json:"tool_name"`
-	CWD       string    `json:"cwd"`
-	Command   string    `json:"command"`
-	Source    string    `json:"source"` // Stable identifier for the decision source.
-	Decision  string    `json:"decision"`
-	Reason    string    `json:"reason,omitempty"`
-	MatchedBy string    `json:"matched_by,omitempty"`
+	Time     time.Time `json:"time"`
+	ToolName string    `json:"tool_name"`
+
+	// Host is the resolved host behavior (--host or POLICYGATE_HOST), e.g.
+	// "claude" or "codex". It records which host contract the decision was made
+	// under; empty when no host was declared.
+	Host string `json:"host,omitempty"`
+
+	CWD       string `json:"cwd"`
+	Command   string `json:"command"`
+	Source    string `json:"source"` // Stable identifier for the decision source.
+	Decision  string `json:"decision"`
+	Reason    string `json:"reason,omitempty"`
+	MatchedBy string `json:"matched_by,omitempty"`
 
 	// Dialect is the shell language the command was read as. It records which
 	// analysis ran, so a decision reached without one - PowerShell has no
