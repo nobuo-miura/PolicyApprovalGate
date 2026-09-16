@@ -1059,6 +1059,34 @@ func TestObserveDoesNotBlockWhenConfigurationIsInvalid(t *testing.T) {
 	}
 }
 
+// The audit log records which host contract a decision was made under, so a
+// shared log can be read back per host.
+func TestRunHookRecordsTheResolvedHostInTheAuditLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(config, rules.DefaultYAML(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICYGATE_CONFIG", config)
+	withArgs(t, "--host", "codex")
+	input := `{"cwd":"/workspace","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hello"}}`
+
+	var output bytes.Buffer
+	if code := runHook(strings.NewReader(input), &output, false); code != 0 {
+		t.Fatalf("runHook() = %d, want successful hook processing", code)
+	}
+
+	logBytes, err := os.ReadFile(filepath.Join(home, ".policygate", "log", "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), `"host":"codex"`) {
+		t.Fatalf("audit log = %s, want it to record host codex", logBytes)
+	}
+}
+
 // Hook mode is the default, so a mistyped subcommand or an unknown flag must
 // be reported instead of silently waiting on stdin.
 func TestCheckHookArgsRejectsUnknownArguments(t *testing.T) {

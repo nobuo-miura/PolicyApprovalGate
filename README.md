@@ -294,6 +294,7 @@ Text rules and path policies for paths that the PowerShell tokenizer can recover
 
 Decisions are written as JSON Lines to `~/.policygate/log/audit.log` by default.
 
+- Each record includes the host the decision was made under (`--host` / `POLICYGATE_HOST`) in the `host` field (e.g. `claude`, `codex`; empty when none was declared)
 - New directories use mode `0700`; new log files use `0600`
 - Permissions of existing directories are left unchanged
 - Existing symlinks, FIFOs, devices, and other non-regular files are rejected
