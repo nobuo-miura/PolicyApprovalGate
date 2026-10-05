@@ -210,6 +210,31 @@ func TestParseRejectsRelativeProjectRoot(t *testing.T) {
 	}
 }
 
+func TestParseRejectsEmptyExtraRootPattern(t *testing.T) {
+	_, err := Parse([]byte("path_scope:\n  extra_roots:\n    - pattern: ''\n      reason: everything\n"))
+	if err == nil || !strings.Contains(err.Error(), "path_scope.extra_roots[0]") {
+		t.Fatalf("expected an error naming path_scope.extra_roots[0] for an empty pattern, got %v", err)
+	}
+}
+
+func TestMatchExtraRoot(t *testing.T) {
+	cfg, err := Parse([]byte("path_scope:\n  extra_roots:\n    - pattern: '^/private/tmp/claude-\\d+/[^/]+/[^/]+/scratchpad(/|$)'\n      reason: scratchpad\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]bool{
+		"/private/tmp/claude-501/-Users-a-Projects-X/1234/scratchpad":           true,
+		"/private/tmp/claude-501/-Users-a-Projects-X/1234/scratchpad/full.diff": true,
+		"/private/tmp/claude-501/-Users-a-Projects-X/1234/scratchpad-other/x":   false,
+		"/private/tmp/claude-501/-Users-a-Projects-X/memory/x":                  false,
+		"/Users/a/.claude/projects/-Users-a-Projects-X/memory/x":                false,
+	} {
+		if got := cfg.MatchExtraRoot(path) != nil; got != want {
+			t.Errorf("MatchExtraRoot(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
 func TestParseRejectsInvalidUnknownAction(t *testing.T) {
 	_, err := Parse([]byte("unknown:\n  action: dney\n"))
 	if err == nil {

@@ -133,6 +133,13 @@ path_scope:
     read: "allow"   # allow | ask | deny
     write: "ask"
     delete: "deny"
+  # Directories treated as inside the project, matched against the fully
+  # resolved path (~, .., and symbolic links resolved; "/" separators). Anchor
+  # each pattern with ^ and (/|$). sensitive_paths and protected_paths still
+  # apply inside them. For example, Claude Code's session scratchpad on macOS:
+  # extra_roots:
+  #   - pattern: '^/private/tmp/claude-\d+/[^/]+/[^/]+/scratchpad(/|$)'
+  #     reason: "Claude Code session scratchpad"
 
 sensitive_paths:
   enabled: true

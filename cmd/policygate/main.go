@@ -814,6 +814,7 @@ func checkPathAccess(cfg *rules.Config, accesses []trackedAccess, cwd string) (d
 		acc, state, links := tracked.access, tracked.state, tracked.links
 		{
 			indeterminate := acc.Indeterminate || state.Indeterminate
+			unfollowable := false
 
 			// Always resolved: self-protection needs the candidates even when
 			// every configured path check is disabled.
@@ -825,7 +826,12 @@ func checkPathAccess(cfg *rules.Config, accesses []trackedAccess, cwd string) (d
 			}
 			if !indeterminate {
 				rewritten := pathpolicy.RewriteThroughPending(pathpolicy.Resolve(state.Path, home, acc.Path), links)
-				pathCandidates = append(pathCandidates, pathpolicy.ResolvePhysical(rewritten))
+				resolved, ok := pathpolicy.ResolvePhysicalChecked(rewritten)
+				pathCandidates = append(pathCandidates, resolved)
+				// A link chain that cannot be followed hides where the write
+				// lands; treat it like any other unresolved path.
+				unfollowable = !ok
+				indeterminate = unfollowable
 			}
 
 			if acc.Op == pathpolicy.OpWrite || acc.Op == pathpolicy.OpDelete {
@@ -866,9 +872,8 @@ func checkPathAccess(cfg *rules.Config, accesses []trackedAccess, cwd string) (d
 			// Never assume an unresolved path remains inside the project.
 			outside := indeterminate
 			if !indeterminate {
-				rewritten := pathpolicy.RewriteThroughPending(pathpolicy.Resolve(state.Path, home, acc.Path), links)
-				resolved := pathpolicy.ResolvePhysical(rewritten)
-				outside = pathpolicy.IsOutside(root, resolved)
+				resolved := pathCandidates[len(pathCandidates)-1]
+				outside = pathpolicy.IsOutside(root, resolved) && cfg.MatchExtraRoot(resolved) == nil
 			}
 			if outside && (!indeterminate || acc.Op != pathpolicy.OpRead) {
 				d := cfg.PathScope.OutsideProject.For(string(acc.Op))
@@ -879,6 +884,8 @@ func checkPathAccess(cfg *rules.Config, accesses []trackedAccess, cwd string) (d
 						reasonSuffix = "path contains an unresolved expansion, treated as " + reasonSuffix
 					case state.Indeterminate:
 						reasonSuffix = "working directory could not be resolved, treated as " + reasonSuffix
+					case unfollowable:
+						reasonSuffix = "symbolic link could not be followed, treated as " + reasonSuffix
 					}
 					best = rank
 					decision, source, matchedBy = d, "path_policy", ""

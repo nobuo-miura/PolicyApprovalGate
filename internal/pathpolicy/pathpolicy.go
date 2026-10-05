@@ -717,12 +717,35 @@ func isAbsPath(p string) bool {
 	return posixpath.IsAbs(p) || filepath.IsAbs(p)
 }
 
+// maxSymlinkHops bounds how many dangling links ResolvePhysicalChecked follows,
+// matching the limit Linux applies to a single lookup (MAXSYMLINKS).
+const maxSymlinkHops = 40
+
 // ResolvePhysical resolves symlinks in the longest existing ancestor and
 // rejoins missing trailing components. path may be in the host's native
-// format; the result always uses forward slashes.
+// format; the result always uses forward slashes. Callers that make a policy
+// decision from the result should use ResolvePhysicalChecked instead.
 func ResolvePhysical(path string) string {
+	resolved, _ := ResolvePhysicalChecked(path)
+	return resolved
+}
+
+// ResolvePhysicalChecked is ResolvePhysical that also reports whether the
+// result is the location a write would really reach.
+//
+// A symbolic link whose target does not exist yet still exists itself, and a
+// write through it creates the target. EvalSymlinks refuses such a link, so it
+// is followed here by hand. When the chain still cannot be resolved - a loop,
+// too many hops, or a link that cannot be read - ok is false and the path is
+// returned as written; it must then be treated as unresolved, because the
+// spelling says nothing about where the write lands.
+func ResolvePhysicalChecked(path string) (resolved string, ok bool) {
+	return resolvePhysical(path, 0)
+}
+
+func resolvePhysical(path string, hops int) (string, bool) {
 	if path == "" || path == "/" {
-		return path
+		return path, true
 	}
 	path = filepath.ToSlash(path)
 	p := path
@@ -733,22 +756,39 @@ func ResolvePhysical(path string) string {
 		}
 		parent := posixpath.Dir(p)
 		if parent == p {
-			return path
+			return path, true
 		}
 		suffix = append([]string{posixpath.Base(p)}, suffix...)
 		p = parent
 	}
 	real, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return path
+		// Every ancestor of p resolved, or p could not have been reached; so
+		// the failure is p itself, and only a link can be followed further.
+		if hops >= maxSymlinkHops {
+			return path, false
+		}
+		info, lerr := os.Lstat(p)
+		if lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+			return path, false
+		}
+		target, rerr := os.Readlink(p)
+		if rerr != nil {
+			return path, false
+		}
+		target = filepath.ToSlash(target)
+		if !isAbsPath(target) {
+			target = posixpath.Join(posixpath.Dir(p), target)
+		}
+		return resolvePhysical(posixpath.Join(append([]string{target}, suffix...)...), hops+1)
 	}
 	// EvalSymlinks returns a path in the host's native format on some
 	// platforms; keep the forward-slash invariant for callers.
 	real = filepath.ToSlash(real)
 	if len(suffix) == 0 {
-		return real
+		return real, true
 	}
-	return posixpath.Join(append([]string{real}, suffix...)...)
+	return posixpath.Join(append([]string{real}, suffix...)...), true
 }
 
 // IsOutside reports whether resolvedPath is outside resolvedRoot. Both

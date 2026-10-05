@@ -53,6 +53,11 @@ type PathScopeConfig struct {
 	// ProjectRoot is either "cwd" or a fixed absolute path.
 	ProjectRoot    string       `yaml:"project_root"`
 	OutsideProject AccessPolicy `yaml:"outside_project"`
+	// ExtraRoots lists patterns for directories treated as inside the project,
+	// such as a host's per-session scratch space. They are matched only against
+	// the fully resolved path, so `..` and symbolic links cannot reach outside
+	// them, and an unresolved path never matches.
+	ExtraRoots []Rule `yaml:"extra_roots"`
 }
 
 // SensitivePathsConfig detects sensitive paths inside or outside the project.
@@ -362,6 +367,12 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("path_scope.project_root: must be \"cwd\" or an absolute path, got %q", c.PathScope.ProjectRoot))
 	}
 	errs = append(errs, validateAccessPolicy("path_scope.outside_project", c.PathScope.OutsideProject)...)
+	for i, r := range c.PathScope.ExtraRoots {
+		// An empty pattern matches every path and would switch the scope off.
+		if strings.TrimSpace(r.Pattern) == "" {
+			errs = append(errs, fmt.Sprintf("path_scope.extra_roots[%d]: pattern must not be empty", i))
+		}
+	}
 	errs = append(errs, validateAccessPolicy("sensitive_paths.policy", c.SensitivePaths.Policy)...)
 
 	if !oneOf(c.Unknown.Action, "", "defer", "ask", "deny") {
@@ -423,6 +434,9 @@ func (c *Config) compile() error {
 	if err := compileRules(c.Allow, "allow"); err != nil {
 		return err
 	}
+	if err := compileRules(c.PathScope.ExtraRoots, "path_scope.extra_roots"); err != nil {
+		return err
+	}
 	if err := compileRules(c.SensitivePaths.Patterns, "sensitive_paths"); err != nil {
 		return err
 	}
@@ -472,6 +486,12 @@ func (c *Config) MatchAsk(cmd string) *Rule {
 // MatchAllow returns the first audit-classification allow rule matching cmd.
 func (c *Config) MatchAllow(cmd string) *Rule {
 	return firstMatch(c.Allow, cmd)
+}
+
+// MatchExtraRoot returns the first path_scope.extra_roots rule matching a
+// resolved path.
+func (c *Config) MatchExtraRoot(resolvedPath string) *Rule {
+	return firstMatch(c.PathScope.ExtraRoots, resolvedPath)
 }
 
 // MatchSensitive returns the first sensitive-path rule matching path.
