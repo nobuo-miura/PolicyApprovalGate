@@ -171,7 +171,7 @@ CodexのPreToolUse hookは単独の`ask`に対応していないため、`--host
 | `ask` | Claude Codeでは確認を求め、Codexでは拒否 |
 | `allow` | 既知の低リスクコマンドとして監査上分類 |
 | `protected_branches` | 保護ブランチへのpushを制御 |
-| `path_scope` | プロジェクト外のread / write / deleteを制御 |
+| `path_scope` | プロジェクト外のread / write / deleteと、プロジェクト内として扱う追加ディレクトリを制御 |
 | `sensitive_paths` | `.env`、SSH鍵、認証情報などを保護 |
 | `protected_paths` | 設定やhook登録へのwrite / deleteを拒否 |
 | `unknown` | どのルールにも一致しない場合の動作 |
@@ -189,6 +189,22 @@ parse_error:
 ```
 
 この設定はClaude Codeでは確認画面を表示しますが、Codexでは対象を拒否します。たとえば`unknown.action: ask`をCodexで使うと、どのルールにも一致しない通常のビルドコマンドまで拒否されます。`check-config`と`doctor`は、この組み合わせを検出して警告します。
+
+### プロジェクト外の特定ディレクトリを許可する
+
+`path_scope.extra_roots`に一致したパスは、プロジェクト内として扱います。Claude Codeがセッションごとに作るscratchpadのように、プロジェクト外でも書き込みを確認なしにしたいディレクトリに使います。
+
+```yaml
+path_scope:
+  extra_roots:
+    - pattern: '^/private/tmp/claude-\d+/[^/]+/[^/]+/scratchpad(/|$)'
+      reason: "Claude Code session scratchpad"
+```
+
+- パターンは、`~`、`..`、symlinkをすべて解決した後の絶対パスと照合します。macOSの`/tmp`は`/private/tmp`へ解決されます。区切り文字はWindowsでも`/`です
+- 解決できないパス（`$VAR`などを含むもの）は一致しません
+- 対象を広げすぎないよう、`^`で始まり`(/|$)`で終わる形で書いてください。空のパターンは設定エラーです
+- 広がるのはプロジェクトの範囲だけです。`sensitive_paths`、`protected_paths`、自己保護はextra roots内でもそのまま適用されます
 
 ### ホストごとに設定を分ける
 

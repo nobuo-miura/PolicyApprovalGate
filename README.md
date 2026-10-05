@@ -171,7 +171,7 @@ Codex PreToolUse hooks do not support a standalone `ask` decision, so `--host co
 | `ask` | Prompt in Claude Code and reject in Codex |
 | `allow` | Classify familiar low-risk commands for audit metadata |
 | `protected_branches` | Control pushes to protected branches |
-| `path_scope` | Control read / write / delete outside the project |
+| `path_scope` | Control read / write / delete outside the project, and extra directories treated as inside it |
 | `sensitive_paths` | Protect `.env`, SSH keys, credentials, and similar files |
 | `protected_paths` | Reject writes and deletes to configuration and hook files |
 | `unknown` | Action when no rule matches |
@@ -189,6 +189,22 @@ parse_error:
 ```
 
 This prompts under Claude Code but rejects under Codex. For example, `unknown.action: ask` under Codex also rejects ordinary build commands when they match no rule. `check-config` and `doctor` detect this combination and print a warning.
+
+### Allowing specific directories outside the project
+
+Paths matching `path_scope.extra_roots` are treated as inside the project. Use it for directories outside the project where writes should not prompt, such as the per-session scratchpad Claude Code creates.
+
+```yaml
+path_scope:
+  extra_roots:
+    - pattern: '^/private/tmp/claude-\d+/[^/]+/[^/]+/scratchpad(/|$)'
+      reason: "Claude Code session scratchpad"
+```
+
+- Patterns are matched against the absolute path after `~`, `..`, and symbolic links are resolved. On macOS, `/tmp` resolves to `/private/tmp`. The separator is `/`, including on Windows
+- A path that cannot be resolved (one containing `$VAR` and the like) never matches
+- To avoid widening the scope too far, start a pattern with `^` and end it with `(/|$)`. An empty pattern is a configuration error
+- Only the project scope widens. `sensitive_paths`, `protected_paths`, and self-protection still apply inside extra roots
 
 ### Separate configurations per host
 

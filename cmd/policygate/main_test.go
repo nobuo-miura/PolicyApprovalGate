@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/nobuo-miura/policyapprovalgate/internal/hook"
+	"github.com/nobuo-miura/policyapprovalgate/internal/pathpolicy"
 	"github.com/nobuo-miura/policyapprovalgate/internal/paths"
 	"github.com/nobuo-miura/policyapprovalgate/internal/rules"
 	"github.com/nobuo-miura/policyapprovalgate/internal/shellparse"
@@ -1203,5 +1205,150 @@ func TestRunInitUpgradeMergesDefaultsAndCreatesBackup(t *testing.T) {
 	backups, err := filepath.Glob(path + ".bak.*")
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("backup files = %v, err = %v", backups, err)
+	}
+}
+
+// extraRootsConfig builds a policy whose only extra root is dir, matched by
+// its resolved spelling the way the gate compares it.
+func extraRootsConfig(t *testing.T, dir string) *rules.Config {
+	t.Helper()
+	resolved := pathpolicy.ResolvePhysical(filepath.ToSlash(dir))
+	return mustConfig(t, fmt.Sprintf(`
+path_scope:
+  enabled: true
+  project_root: "cwd"
+  outside_project:
+    read: "allow"
+    write: "ask"
+    delete: "deny"
+  extra_roots:
+    - pattern: '^%s(/|$)'
+      reason: "test scratch space"
+sensitive_paths:
+  enabled: true
+  patterns:
+    - pattern: '(^|/)\.env$'
+      reason: "Environment file"
+  policy:
+    read: "ask"
+    write: "deny"
+    delete: "deny"
+audit:
+  enabled: false
+`, regexp.QuoteMeta(resolved)))
+}
+
+func TestEvaluateTreatsExtraRootsAsInsideTheProject(t *testing.T) {
+	scratch := filepath.Join(t.TempDir(), "scratchpad")
+	if err := os.Mkdir(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := extraRootsConfig(t, scratch)
+	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
+
+	for _, cmd := range []string{
+		"echo x > " + filepath.Join(scratch, "out.txt"),
+		"rm -f " + filepath.Join(scratch, "out.txt"),
+		"git diff > " + filepath.Join(scratch, "sub", "full.diff"),
+	} {
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, cmd)
+		if decision != "" {
+			t.Errorf("evaluate(%q) = decision:%q source:%q (%s), want no path decision inside an extra root", cmd, decision, source, reason)
+		}
+	}
+
+	decision, reason, _, _ := evaluateFileTool(cfg, in, filepath.Join(scratch, "notes.md"), pathpolicy.OpWrite)
+	if decision != "" {
+		t.Errorf("Write inside an extra root = %q (%s), want no decision", decision, reason)
+	}
+}
+
+// An extra root widens the project scope and nothing else: escapes from it
+// and the path rules that apply inside the project still hold.
+func TestEvaluateExtraRootsDoNotWeakenOtherPathChecks(t *testing.T) {
+	base := t.TempDir()
+	scratch := filepath.Join(base, "scratchpad")
+	outside := filepath.Join(base, "elsewhere")
+	for _, dir := range []string{scratch, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(scratch, "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "new.txt"), filepath.Join(scratch, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := extraRootsConfig(t, scratch)
+	in := hook.Input{ToolName: "Bash", CWD: t.TempDir()}
+
+	for _, test := range []struct {
+		command  string
+		decision hook.Decision
+	}{
+		{"echo x > " + scratch + "/../elsewhere/out.txt", hook.DecisionAsk},
+		{"echo x > " + filepath.Join(scratch, "link", "out.txt"), hook.DecisionAsk},
+		{"echo x > " + scratch + "-sibling/out.txt", hook.DecisionAsk},
+		{"echo x > \"$SCRATCH\"/out.txt", hook.DecisionAsk},
+		{"echo x > " + filepath.Join(scratch, ".env"), hook.DecisionDeny},
+		// A dangling link resolves to the file the write would create.
+		{"echo x > " + filepath.Join(scratch, "dangling"), hook.DecisionAsk},
+	} {
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, test.command)
+		if decision != test.decision || source != "path_policy" {
+			t.Errorf("evaluate(%q) = decision:%q source:%q (%s), want %s/path_policy", test.command, decision, source, reason, test.decision)
+		}
+	}
+}
+
+// A link inside the project whose target does not exist yet must be judged by
+// where the write lands. The project directory is resolved first so the test
+// does not pass by accident on a temp directory reached through a symlink,
+// such as /var on macOS.
+func TestEvaluateJudgesDanglingLinksByTheirTarget(t *testing.T) {
+	physical := func(dir string) string {
+		t.Helper()
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolved
+	}
+	project := physical(t.TempDir())
+	outside := physical(t.TempDir())
+	if err := os.MkdirAll(filepath.Join(outside, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for link, target := range map[string]string{
+		"out":   filepath.Join(outside, "new.txt"),
+		"hook":  filepath.Join(outside, ".claude", "settings.local.json"),
+		"loopA": filepath.Join(project, "loopB"),
+		"loopB": filepath.Join(project, "loopA"),
+	} {
+		if err := os.Symlink(target, filepath.Join(project, link)); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+	}
+	cfg := mustConfig(t, strings.Replace(pathScopeYAML, "audit:\n  enabled: false\n", "", 1)+protectedPathsYAML)
+	in := hook.Input{ToolName: "Bash", CWD: project}
+
+	for _, test := range []struct {
+		command  string
+		decision hook.Decision
+	}{
+		{"echo x > out", hook.DecisionAsk},
+		{"echo x > hook", hook.DecisionDeny},
+		{"echo x > loopA", hook.DecisionAsk},
+	} {
+		decision, reason, source, _ := evaluatePOSIX(cfg, in, test.command)
+		if decision != test.decision || source != "path_policy" {
+			t.Errorf("evaluate(%q) = decision:%q source:%q (%s), want %s/path_policy", test.command, decision, source, reason, test.decision)
+		}
+	}
+
+	decision, reason, _, _ := evaluateFileTool(cfg, in, filepath.Join(project, "out"), pathpolicy.OpWrite)
+	if decision != hook.DecisionAsk {
+		t.Errorf("Write through a dangling link = %q (%s), want ask", decision, reason)
 	}
 }
